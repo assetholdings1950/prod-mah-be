@@ -1,0 +1,561 @@
+import mongoose from "mongoose";
+import dotenv from "dotenv";
+dotenv.config();
+
+import categoryModel from "../models/newsModel/category.model.js";
+import newsModel from "../models/newsModel/news.model.js";
+import { syncCategoryToFirebase, syncNewsToFirebase } from "../firebase/newsSync.firebase.js";
+
+const FRONTEND_BASE_URL = "https://thecartel.ai";
+const DEFAULT_OG_IMAGE = "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1762123663/news_images/isqp0r3bceegnajbtjuu.jpg";
+
+// 🧩 Ensure Mongo URL exists
+// const MONGO_URL = "mongodb+srv://developmentteam_db_user:DgFiScz1vKuTXPWa@cluster0.e4wkjk1.mongodb.net/"
+const MONGO_URL = "mongodb+srv://developmentteam_db_user:IDyMveM5483GEMaX@cluster0.kkzrftu.mongodb.net/"
+
+if (!MONGO_URL) {
+    console.error("❌ Missing MONGO_URL in environment variables.");
+    process.exit(1);
+}
+
+// 🧠 Helper: slugify text
+const slugifyText = (text = "") =>
+    text
+        .toString()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/(^-|-$)+/g, "");
+
+// 🚀 Main Migration Function
+export const migrateOldNewsToNewFormat = async (oldDataArray, createdBy) => {
+    try {
+        if (!Array.isArray(oldDataArray)) {
+            throw new Error("Input must be an array of old news data");
+        }
+
+        const results = [];
+
+        for (const item of oldDataArray) {
+            const heading = item.heading?.trim() || "Untitled News";
+            const subheading = item.subheading || "";
+            const description = item.description || "";
+            const author = item.author || "The Coin Cartel®";
+
+            // 🧩 Category (default: general)
+            const categoryName = "general";
+            const categorySlug = slugifyText(categoryName);
+            let catDoc = await categoryModel.findOne({ slug: categorySlug });
+
+            if (!catDoc) {
+                catDoc = await categoryModel.create({
+                    name: categoryName,
+                    slug: categorySlug,
+                    createdBy,
+                });
+                await syncCategoryToFirebase(catDoc).catch(console.error);
+            }
+
+            // 🧩 Tags placeholder
+            const tagIds = [];
+
+            // 🧠 Slug and SEO
+            const slug = slugifyText(heading);
+            const cleanDescription = description.replace(/<[^>]+>/g, "");
+            const metaTitle = heading;
+            const metaDescription = subheading || cleanDescription.slice(0, 160);
+            const excerpt = subheading || cleanDescription.slice(0, 300);
+            const canonicalUrl = `${FRONTEND_BASE_URL}/news/${categorySlug}/${slug}`;
+            const ogTitle = heading;
+            const ogDescription = subheading || cleanDescription.slice(0, 150);
+            const ogImage = item.image || DEFAULT_OG_IMAGE;
+
+            const payload = {
+                heading,
+                subheading,
+                description,
+                excerpt,
+                author,
+                image: item.image || DEFAULT_OG_IMAGE,
+                createdBy,
+                category: catDoc._id,
+                tags: tagIds,
+                slug,
+                status: "published",
+                publishedAt: item.updatedAt || new Date(),
+                isFeatured: false,
+                metaTitle,
+                metaDescription,
+                metaKeywords: [],
+                canonicalUrl,
+                credibilityScore: 0,
+                ogTitle,
+                ogDescription,
+                ogImage,
+                sourceUrl: null,
+                createdAt: item.createdAt || new Date(),
+                updatedAt: item.updatedAt || new Date(),
+            };
+
+            // 🔄 Upsert (update or insert)
+            // const news = await newsModel.findOneAndUpdate(
+            //     { _id: item._id },
+            //     { $set: payload },
+            //     { upsert: true, new: true }
+            // );
+
+            const news = await newsModel.findOneAndUpdate(
+                { _id: item._id },
+                {
+                    $set: {
+                        ...payload,
+                        updatedAt: item.updatedAt || new Date(),
+                    },
+                    $setOnInsert: { createdAt: item.createdAt || new Date() },
+                },
+                { upsert: true, new: true, timestamps: false }
+            );
+
+            await syncNewsToFirebase(news).catch(console.error);
+
+            results.push(news);
+            console.log(`✅ Migrated: ${heading}`);
+        }
+
+        return {
+            status: true,
+            message: "Migration complete",
+            count: results.length,
+        };
+    } catch (error) {
+        console.error("🔥 Migration Error:", error);
+        return {
+            status: false,
+            message: error.message,
+        };
+    }
+};
+
+// 🧩 Run Migration
+const runMigration = async () => {
+    try {
+        console.log("🔗 Connecting to MongoDB...");
+        await mongoose.connect(MONGO_URL);
+        console.log("✅ MongoDB connected.");
+
+        const createdBy = "68d18a28f2866f5fc28008ad"; // Admin ID
+        const result = await migrateOldNewsToNewFormat(oldNewsData, createdBy);
+        console.log(result);
+
+        console.log("🔒 Closing MongoDB connection...");
+        await mongoose.connection.close();
+        console.log("✅ Migration finished successfully.");
+    } catch (err) {
+        console.error("❌ Migration failed:", err);
+        await mongoose.connection.close();
+    }
+};
+
+runMigration();
+
+
+
+
+// 🧩 Original Old Data (temporary)
+const oldNewsData = [
+    {
+        "_id": "68f81c45d9f118a58aad64f7",
+        "heading": "Galaxy Digital Posts $505M Q3 Profit Amid Massive Trading Surge! 🚀",
+        "subheading": "Institutional demand and 140% jump in trading volumes power Galaxy’s stellar quarter. 💹",
+        "author": "– The Coin Cartel®",
+        "description": "<p>Galaxy Digital has reported a $505 million profit in Q3, marking one of its strongest quarters yet. The boost came from a 140% increase in trading activity and growing institutional participation in crypto markets. With continued expansion in its asset management division, Galaxy’s results signal renewed confidence from big players and a resurgence of institutional capital flowing into crypto. 🏦🔥</p><p></p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761090628/news_images/gh95eln7dnzda2ddhap8.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-21T23:50:29.313Z",
+        "updatedAt": "2025-10-21T23:50:29.313Z",
+        "__v": 0
+    },
+    {
+        "_id": "68f8f06284867d3b3e871ef8",
+        "heading": "Bitwise CIO: Bitcoin Could Mirror Gold’s Explosive Rally Soon!",
+        "subheading": "Matt Hougan sees gold’s 57% surge in 2025 as a blueprint for Bitcoin’s next big move.",
+        "author": "– The Coin Cartel®",
+        "description": "<p>Bitwise CIO Matt Hougan believes Bitcoin may be gearing up for a major breakout, similar to gold’s parabolic rise this year. While BTC’s price action remains muted, Hougan says the market is simply clearing out remaining sellers — setting the stage for Bitcoin’s next powerful leg upward. 💥</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761144930/news_images/nan1pvokicuzwo7mvbch.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-22T14:55:30.707Z",
+        "updatedAt": "2025-10-22T14:55:30.707Z",
+        "__v": 0
+    },
+    {
+        "_id": "68f8f35b3db5028bd58ff84d",
+        "heading": "Shiba Inu Holders Hit 1.54M as SHIB Fights to Hold Support! 🐕🔥",
+        "subheading": "Despite growing adoption, SHIB faces pressure near key price levels — can the meme coin defend its crucial support?",
+        "author": "– The Coin Cartel®",
+        "description": "<p>Shiba Inu is trading at $0.00000990, struggling to break resistance at $0.00001076 and $0.00001160.</p><p>Holders have climbed to 1.54 million, showing steady long-term confidence.</p><p>But if SHIB loses its $0.00000900 support zone, it could dip further toward $0.00000800. 👀</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761145690/news_images/y0flj4agwfbejaw756kt.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-22T15:08:11.080Z",
+        "updatedAt": "2025-10-22T15:08:11.080Z",
+        "__v": 0
+    },
+    {
+        "_id": "68f905dcdb541cccd23cab45",
+        "heading": "Jim Cramer Warns of “2000 Territory” as Speculation Heats Up",
+        "subheading": "$730M in leveraged positions wiped out while JPMorgan’s $1.5T plan fuels risky bets",
+        "author": "– The Coin Cartel®",
+        "description": "<p>CNBC’s Jim Cramer cautions that markets — especially crypto — are entering a bubble-like phase similar to the dot-com era. Over $730 million in leveraged trades were liquidated within 24 hours, signaling extreme volatility. Despite JPMorgan’s $1.5 trillion capital plan boosting risk appetite, the total crypto market cap dropped to $3.65 trillion, hinting that investors remain cautious beneath the hype.</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761150427/news_images/cbumrij2gkmropzaxujw.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-22T16:27:08.247Z",
+        "updatedAt": "2025-10-22T16:27:08.247Z",
+        "__v": 0
+    },
+    {
+        "_id": "68f90729db541cccd23cab4c",
+        "heading": "🇨🇳 China’s AIs Outsmart ChatGPT & Grok in Crypto Trading! 💥",
+        "subheading": "DeepSeek posts profits while big-budget rivals struggle 💹",
+        "author": "– The Coin Cartel®",
+        "description": "<p>China’s budget-friendly AI models are dominating crypto trading! DeepSeek, with the smallest development budget, was the only AI to generate positive returns, outperforming ChatGPT and Grok, according to CoinGlass data. ⚡</p><p></p><p>#AI #CryptoTrading #DeepSeek #ChatGPT #Grok #CryptoNews #AIRevolution</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761150760/news_images/pajdo1qupikvpse7dt9m.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-22T16:32:41.120Z",
+        "updatedAt": "2025-10-22T16:32:41.120Z",
+        "__v": 0
+    },
+    {
+        "_id": "68f92c7169e43ead4df1c567",
+        "heading": "🚀 Bitget x Google Developer Group: AI & Blockchain Hackathon",
+        "subheading": "200 Innovators to Tackle Real-World Challenges",
+        "author": "– The Coin Cartel®",
+        "description": "<p>Bitget, in collaboration with Google Developer Group (GDG), is launching the AI Accelerate Hack, a groundbreaking event bringing together 200 participants to solve real-world problems using AI and blockchain technologies. As part of its Blockchain4Youth initiative, Bitget will mentor and empower the next generation of Web3 talent through educational programs and its exclusive Graduate Program.</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761160305/news_images/qifkht9bhosubmtccvxo.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-22T19:11:45.654Z",
+        "updatedAt": "2025-10-22T19:11:45.654Z",
+        "__v": 0
+    },
+    {
+        "_id": "68f93d3822b59c6ad382fa2c",
+        "heading": "Tensions Flare as Senate Democrats Clash with Crypto Executives Over New Regulation Bill",
+        "subheading": "Leaked proposal sparks outrage and heated exchanges in Washington D.C. meetings.",
+        "author": "– The Coin Cartel®",
+        "description": "<p>Crypto executives met with Senate Democrats to discuss a sweeping digital assets regulation bill after a leaked proposal drew major backlash from the crypto community. The tense meeting saw strong reactions from lawmakers, with one senator reportedly saying, “I’m really f*cking pissed about what happened last week,” highlighting growing friction between policymakers and the digital asset industry.</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761164599/news_images/kaijyqqro2vwcz6yslxo.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-22T20:23:20.144Z",
+        "updatedAt": "2025-10-22T20:23:20.144Z",
+        "__v": 0
+    },
+    {
+        "_id": "68f9559e417a9fd0ee865366",
+        "heading": "🚀 RippleNet Expansion: XRP vs Stablecoins in Cross-Border Payments",
+        "subheading": "XRP’s Role as a Banking Bridge Faces New Tests Amid RippleNet Growth",
+        "author": "– The Coin Cartel®",
+        "description": "<p>A German analyst claims XRP has matured into a banking bridge layer rather than “just another coin.” With RippleNet expanding and GTreasury gaining traction, the debate heats up — do banks truly need XRP, or will stablecoins take the lead in cross-border settlements? Meanwhile, ETF optimism clashes with U.S. government shutdown delays, leaving market sentiment divided.</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761170845/news_images/bpuzky9dqymm5fz53huu.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-22T22:07:26.228Z",
+        "updatedAt": "2025-10-22T22:07:26.228Z",
+        "__v": 0
+    },
+    {
+        "_id": "68f965b108866010a3f8e909",
+        "heading": "🚀 Coinbase Launches AI-Ready Crypto Wallet Tool",
+        "subheading": "Major step toward AI-driven onchain finance",
+        "author": "– The Coin Cartel®",
+        "description": "<p>Coinbase has unveiled a new tool that allows AI agents like Claude and Gemini to directly access crypto wallets. This move highlights growing interest from tech giants in integrating AI with blockchain systems. The launch follows the x402 Foundation initiative, backed by Coinbase and Cloudflare, which aims to standardize AI-powered payments.</p><p></p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761174960/news_images/dpjj57r5fzpmzexwhbet.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-22T23:16:01.168Z",
+        "updatedAt": "2025-10-22T23:16:01.168Z",
+        "__v": 0
+    },
+    {
+        "_id": "68f9dd3e2fbf019697141362",
+        "heading": "Cardano Price Prediction: Traders Await Key Breakout After $1.34M Net Outflows",
+        "subheading": "ADA Holds Steady as Investors Turn Cautious, Eyes on Ecosystem Expansion",
+        "author": "– The Coin Cartel®",
+        "description": "<p>Current Price: Cardano (ADA) is trading at $0.63, maintaining key support around $0.60.</p><p></p><p>Resistance Levels: Buyers face hurdles near $0.70–$0.77, signaling a potential breakout zone.</p><p></p><p>Market Sentiment: According to Coinglass, ADA saw $1.34M in net outflows on Oct. 23, hinting at cautious trader sentiment.</p><p></p><p>Ecosystem Growth: The Cardano Foundation has announced plans for .ada and .cardano domains, a move expected to boost network visibility and adoption.</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761205566/news_images/db0zkh5kry3s8uj8vag7.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-23T07:46:06.953Z",
+        "updatedAt": "2025-10-23T07:46:06.953Z",
+        "__v": 0
+    },
+    {
+        "_id": "68fa12a3a43d80074e7d40e3",
+        "heading": "🚀 WazirX Trading Resumes After 16-Month Hiatus!",
+        "subheading": "🔒 Comeback After $230M Lazarus Group Hack",
+        "author": "– The Coin Cartel®",
+        "description": "<p>WazirX is set to restart trading on Oct. 24,</p><p>marking its return after a 16-month suspension</p><p>following a massive $230 million hack</p><p>linked to North Korea’s Lazarus Group.</p><p>The relaunch signals a new chapter for one of India’s top crypto exchanges.</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761219235/news_images/lsclqyzfcnhyflzoto73.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-23T11:33:55.547Z",
+        "updatedAt": "2025-10-23T11:33:55.547Z",
+        "__v": 0
+    },
+    {
+        "_id": "68fb488a735f0ef051a95194",
+        "heading": "🚀 Pi Price Prediction Update",
+        "subheading": "📊 Pi Price Stabilizes Amid Strong KYC Growth",
+        "author": "– The Coin Cartel®",
+        "description": "<p>Pi Network’s price is holding firm near the $0.20 support, showing early accumulation signs among traders. With over 3.36 million KYC approvals, network trust and legitimacy continue to rise. A break above $0.22 could spark a bullish reversal targeting the $0.26 resistance zone.</p><p></p><p>#PiNetwork #PiCoin #CryptoNews #KYC #Bullish #PiUpdate</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761298569/news_images/ie5xhdxlg5l0txonpmxl.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-24T09:36:10.272Z",
+        "updatedAt": "2025-10-24T09:36:10.272Z",
+        "__v": 0
+    },
+    {
+        "_id": "68fce7cc927c13f24593c461",
+        "heading": "🚀 Dogecoin Price Prediction: Wedge Breakout Could Ignite 15% Rally!",
+        "subheading": "DOGE eyes a major move as bullish momentum builds — all eyes on the $0.205 resistance level.",
+        "author": "– The Coin Cartel®",
+        "description": "<p>💥&nbsp;Dogecoin is consolidating around $0.197 within a symmetrical wedge, with a critical breakout level at $0.205. Exchange outflows of $26.6M suggest strong accumulation and reduced sell pressure. Rising derivatives open interest and long positions further signal a bullish setup, potentially driving DOGE toward the $0.216–$0.220 zone if resistance breaks</p><p>.</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761404876/news_images/n9cstduflmwbeufdj6ed.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-25T15:07:56.577Z",
+        "updatedAt": "2025-10-25T15:07:56.577Z",
+        "__v": 0
+    },
+    {
+        "_id": "68fe7e697112ad19db0df24d",
+        "heading": "🔥 Coinbase’s x402 Transactions Skyrocket 10,000% in a Month 🚀",
+        "subheading": "AI-driven payments protocol sees massive surge as autonomous agents embrace on-chain stablecoin transfers.",
+        "author": "– The Coin Cartel®",
+        "description": "<p>Coinbase’s x402 protocol, launched in May to power AI-to-AI and AI-to-human transactions using stablecoins, has recorded a staggering 10,000% spike in activity over the past month. The surge highlights growing adoption of autonomous on-chain payments, positioning Coinbase at the forefront of the AI + crypto integration wave.</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761508968/news_images/jussoxh2qntksgprpvhc.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-26T20:02:49.075Z",
+        "updatedAt": "2025-10-26T20:02:49.075Z",
+        "__v": 0
+    },
+    {
+        "_id": "690131a819db1a6faecf41f7",
+        "heading": "Binance Alpha Removes 18 Tokens From Featured Listing Pool",
+        "subheading": "Binance tightens quality standards on its Alpha platform, delisting underperforming or non-compliant tokens including $ALON, $CA, $HAT, $RIF, and $HAPPY.",
+        "author": "– The Coin Cartel®",
+        "description": "<p>Binance Alpha has removed 18 tokens from its featured listing pool as part of its ongoing quality review process. The affected tokens are no longer available for new purchases but can still be traded through other means. Earlier this year, Binance implemented a stricter evaluation framework requiring projects to meet both qualitative and quantitative benchmarks—covering liquidity, trading volume, community strength, and compliance. The move underscores Binance’s focus on maintaining credibility and reducing risks from low-activity or non-compliant assets, turning Alpha into a curated space for high-quality early-access tokens.</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761685927/news_images/cme3oht7hxydouwvjstw.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-28T21:12:08.020Z",
+        "updatedAt": "2025-10-28T21:12:08.020Z",
+        "__v": 0
+    },
+    {
+        "_id": "69015358103cbf20e8723909",
+        "heading": "PayPal Partners With OpenAI to Power Instant Checkout in ChatGPT",
+        "subheading": "Merchants to List Products and Accept PayPal Payments Directly Inside ChatGPT by 2026",
+        "author": "– The Coin Cartel®",
+        "description": "<p>PayPal is teaming up with OpenAI to introduce instant checkout capabilities within ChatGPT, enabling users to browse catalogs and complete purchases seamlessly through PayPal. The integration marks a major step toward “agentic commerce”, blending conversational AI with real-time payments. PayPal’s stock (PYPL) surged in pre-market trading as excitement builds around this next-gen commerce vision.</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761694551/news_images/tgtat9bzc5z4rok0ojlz.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-28T23:35:52.048Z",
+        "updatedAt": "2025-10-28T23:35:52.048Z",
+        "__v": 0
+    },
+    {
+        "_id": "69030a910133af263ab214cc",
+        "heading": "🇭🇰 Hong Kong Regulator Warns of Risks in Digital Asset Treasury Market",
+        "subheading": "SFC flags concern over inflated premiums and tighter oversight ahead",
+        "author": "– The Coin Cartel®",
+        "description": "<p>Hong Kong’s Securities and Futures Commission (SFC) has raised red flags over digital asset treasuries (DATs) trading at high premiums. The regulator is closely monitoring how these instruments operate and may introduce new guidelines. SFC Chair Kelvin Wong Tin-yau also emphasized plans to boost investor education around DAT-related risks.</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761806992/news_images/eyljxdoubylfdvq5alf1.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-30T06:49:53.272Z",
+        "updatedAt": "2025-10-30T06:49:53.272Z",
+        "__v": 0
+    },
+    {
+        "_id": "69036cc5bae4b6f02ad00220",
+        "heading": "Ripple’s XRP Escrow Sparks Fresh Centralization Debate",
+        "subheading": "Analysts Question Ripple’s Control and True Circulating Supply",
+        "author": "– The Coin Cartel®",
+        "description": "<p>Ripple’s massive XRP escrow holdings are once again under scrutiny, as analysts raise concerns about transparency and centralization. CTO David Schwartz clarified that escrowed XRP can’t enter circulation until officially released — yet some argue the real circulating supply may be far smaller than reported. #Ripple #XRP #CryptoNews</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761832133/news_images/owv2tatjhlbl739clhia.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-30T13:48:53.859Z",
+        "updatedAt": "2025-10-30T13:48:53.859Z",
+        "__v": 0
+    },
+    {
+        "_id": "69036efaa6da9a4023580329",
+        "heading": "🚀 SpaceX Shifts Another $31 Million in Bitcoin to New Wallet",
+        "subheading": "💫 Elon Musk’s SpaceX continues major BTC movements amid custody upgrades",
+        "author": "– The Coin Cartel®",
+        "description": "<p>🧾&nbsp;Blockchain tracker Arkham reports SpaceX moved 281 BTC (~$31M) to a new wallet on Oct. 29, marking its fifth transfer this month. In total, the company has shifted 4,337 BTC (~$471.6M) in October — likely consolidating funds and upgrading from legacy Bitcoin addresses.</p><p></p><p>#SpaceX #Bitcoin #ElonMusk #CryptoNews #BTCTransfers #Arkham</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761832698/news_images/gbrdtcqxprdly3kq6kbp.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-30T13:58:18.559Z",
+        "updatedAt": "2025-10-30T13:58:18.559Z",
+        "__v": 0
+    },
+    {
+        "_id": "6903c415c39b2fc1e023ccad",
+        "heading": "🚨 Bitcoin’s December Dilemma: Fed Split Clouds Crypto Market Outlook",
+        "subheading": "💠 Powell’s caution after rate cut sparks investor jitters and fresh volatility across Bitcoin and altcoins",
+        "author": "– The Coin Cartel®",
+        "description": "<p>The Federal Reserve delivered a widely expected 25-basis-point rate cut on October 29, bringing the target range down to 3.75%–4.00% — the first easing move in months. However, what truly unsettled the markets was Fed Chair Jerome Powell’s statement that a further cut in December is “not a foregone conclusion.”</p><p></p><p>Powell’s remarks signaled a deep divide within the FOMC over the pace of monetary easing, leaving traders uncertain about policy direction heading into year-end. The reaction was swift — Bitcoin slid roughly 3%, while Ethereum, XRP, and other altcoins lost between 2% and 5%, as risk sentiment soured across digital assets.</p><p></p><p>Analysts say the crypto market could face heightened volatility in November, with macro signals now taking the driver’s seat for Bitcoin’s next major move.</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761854484/news_images/rtyxn4c5e3nolqzh2myb.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-30T20:01:25.253Z",
+        "updatedAt": "2025-10-30T20:01:25.253Z",
+        "__v": 0
+    },
+    {
+        "_id": "6903f174a88f41204313483f",
+        "heading": "🔒 Hong Kong Regulators Clamp Down on Bitcoin Treasury Moves",
+        "subheading": "HKEX Rejects Multiple Firms Seeking Digital Asset Treasury Status",
+        "author": "– The Coin Cartel®",
+        "description": "<p>📉 Hong Kong regulators have stepped up scrutiny on listed firms exploring Digital Asset Treasury (DAT) strategies.</p><p>🚫 The Hong Kong Stock Exchange has rejected at least five companies applying to shift their focus toward crypto holdings.</p><p>⚠️ SFC Chairman Wong Tin-yau cautioned that the “DAT premium” could disappear “within a day.”</p><p>📜 Current regulations bar listed firms from transforming into pure cryptocurrency-holding entities.</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761866100/news_images/vx2f2evbl5qn1d0iryr1.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-30T23:15:00.458Z",
+        "updatedAt": "2025-10-30T23:15:00.458Z",
+        "__v": 0
+    },
+    {
+        "_id": "69049d4f388c4205a4c66a58",
+        "heading": "Solana Price Prediction — Bears Target Crucial $180 Support",
+        "subheading": "Momentum Fades as Market Volatility Builds and Bulls Lose Grip",
+        "author": "– The Coin Cartel®",
+        "description": "<p>Solana’s bullish momentum is showing signs of exhaustion as bears tighten their hold on the short-term trend. The $180 support zone has become a key battleground — a decisive break below could trigger deeper corrections across the altcoin market.</p><p></p><p>Meanwhile, open interest has climbed past $10 billion, signaling heightened volatility and a potential spike in liquidation risks. Despite these bearish signals, recent inflows into Solana indicate that some investors are cautiously returning, suggesting a possible rebound if support holds.</p><p></p><p>📊 Keep an eye on the $180 level — it’s the line between recovery and reversal.</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761910094/news_images/z5o8de9qkfg2bfm5ukpz.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-31T11:28:15.352Z",
+        "updatedAt": "2025-10-31T11:28:15.352Z",
+        "__v": 0
+    },
+    {
+        "_id": "6904cda7d4dde67cc71b1078",
+        "heading": "🇺🇸 Coinbase Claps Back at Senator Murphy Over “Trump Favoritism” Allegations",
+        "subheading": "Exchange dismisses claims as “ridiculous,” says its donations are nonpartisan and focused on advancing crypto innovation",
+        "author": "– The Coin Cartel®",
+        "description": "<p>A fresh political storm has hit the U.S. crypto scene after Senator Chris Murphy accused Coinbase of fueling “Trump’s corruption factory” through its political contributions. The claim quickly drew backlash from the exchange, with Faryar Shirzad, Coinbase’s Chief Policy Officer, calling the allegation “completely ridiculous.”</p><p></p><p>Shirzad emphasized that Coinbase’s support for Fairshake — a pro-crypto political action committee — is strictly nonpartisan, aimed at promoting fair and forward-looking crypto regulations across both political parties.</p><p></p><p>Coinbase reiterated that its mission is to empower crypto adoption, not engage in partisan politics, adding that building a healthy regulatory environment benefits the entire digital asset ecosystem — regardless of who holds office.</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761922470/news_images/oh6xqqp4w9m5hapsgyni.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-31T14:54:31.148Z",
+        "updatedAt": "2025-10-31T14:54:31.148Z",
+        "__v": 0
+    },
+    {
+        "_id": "690502fa31235a77b2dd199c",
+        "heading": "🚀 Bitcoin Rebounds to $110K!",
+        "subheading": "US–China Accord Revives Market Confidence Despite Hawkish Fed & ETF Outflows",
+        "author": "– The Coin Cartel®",
+        "description": "<p>Bitcoin has staged a powerful rebound, climbing back near $110,000, as improved relations between the U.S. and China spark a fresh wave of optimism across global markets. 🇺🇸🤝🇨🇳</p><p></p><p>According to analysts, the Trump–Xi tariff truce has become a major catalyst for risk assets, helping fill the macro void created by the ongoing U.S. data blackout. This diplomatic breakthrough has reassured investors and injected new life into the crypto market’s sentiment.</p><p></p><p>However, the rally faces a cautious backdrop — Federal Reserve Chair Jerome Powell maintained a hawkish stance, signaling that a December rate cut isn’t guaranteed. Meanwhile, spot Bitcoin ETFs continue to witness outflows, reflecting ongoing uncertainty among institutional traders.</p><p></p><p>Despite these challenges, Bitcoin’s resilience at the $110K mark highlights growing confidence that macro stability could pave the way for the next leg of the bull run. 💥📈</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761936121/news_images/doiiwjnf16bvs7hpcp8u.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-31T18:42:02.192Z",
+        "updatedAt": "2025-10-31T18:42:02.192Z",
+        "__v": 0
+    },
+    {
+        "_id": "69051609d4fd97628f5777e8",
+        "heading": "Custodia Bank Hit with Another Court Rejection",
+        "subheading": "10th Circuit Court Blocks Custodia’s Bid for a Federal Reserve Master Account",
+        "author": "– The Coin Cartel®",
+        "description": "<p>Crypto-friendly Custodia Bank has suffered yet another legal defeat as the 10th Circuit Court of Appeals ruled against its long-standing effort to obtain a Federal Reserve master account. The verdict, delivered nine months after hearings, marks another major hurdle for Custodia’s push to gain direct access to the U.S. banking system.</p><p></p><p>#CryptoNews #CustodiaBank #FederalReserve #CryptoRegulation #DeFi</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761941000/news_images/qobsle2svhjmle80ukey.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-31T20:03:21.298Z",
+        "updatedAt": "2025-10-31T20:03:21.298Z",
+        "__v": 0
+    },
+    {
+        "_id": "690525a0fa1a1453a88281b8",
+        "heading": "🔥 CZ’s Lawyer Hits Back at Sen. Warren! 🔥",
+        "subheading": "After Trump’s Pardon, Legal Tensions Erupt Over “Unfair Remarks” ⚡",
+        "author": "– The Coin Cartel®",
+        "description": "<p>Changpeng “CZ” Zhao’s attorney, Teresa Goody Guillén, has sent a powerful legal letter to Senator Elizabeth Warren — demanding an immediate retraction of her post-pardon comments.</p><p></p><p>The move comes just days after Donald Trump pardoned the former Binance CEO, who had pleaded guilty in 2023 for failing to maintain an effective anti–money laundering program.</p><p></p><p>The political and crypto worlds are now buzzing as CZ’s camp pushes back hard against what they call “misleading and damaging statements.”</p><p></p><p>#CZ #Binance #ElizabethWarren #Trump #CryptoNews #Breaking #Blockchain #CryptoCommunity</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761944992/news_images/zujoidppcnegokh8mrm1.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-10-31T21:09:52.572Z",
+        "updatedAt": "2025-10-31T21:09:52.572Z",
+        "__v": 0
+    },
+    {
+        "_id": "6905d5735449eefbdae8806b",
+        "heading": "💰 Stablecoin Issuers Rule Crypto Revenues",
+        "subheading": "Dominating up to 75% of daily protocol earnings",
+        "author": "– The Coin Cartel®",
+        "description": "<p>🔥 Stablecoin giants are taking over the crypto economy — seizing a jaw-dropping 75% of all daily protocol earnings! With the competition getting fierce, top issuers are now exploring bold, innovative ways to share value, boost adoption, and stay ahead in the ever-evolving DeFi race.</p><p></p><p>#Stablecoins #CryptoNews #DeFi #Web3 #Blockchain #CryptoEarnings #TheBlock #CryptoMarket #DigitalAssets</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1761990002/news_images/n8xtskuhjn5gov2w8wuk.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-11-01T09:40:03.040Z",
+        "updatedAt": "2025-11-01T09:40:03.040Z",
+        "__v": 0
+    },
+    {
+        "_id": "69065a2f1524a02867794d03",
+        "heading": "🚀 BITCOIN HITS $2 TRILLION — BUT HISTORY HAS A WARNING!",
+        "subheading": "📉 Even Newton Couldn’t Escape Market Madness!",
+        "author": "– The Coin Cartel®",
+        "description": "<p>💬 Bitcoin’s massive $2T valuation is fueling a “too big to fail” mindset — but analysts warn that history repeats.</p><p>In 1720, the South Sea Bubble burst and bankrupted Sir Isaac Newton, proving that market psychology and euphoria — not size — remain the biggest risks for investors.</p><p></p><p>#Bitcoin #BTC #CryptoNews #MarketPsychology #Investing #CryptoMarket</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1762023983/news_images/dlfi7auo7yz2gihtkgdf.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-11-01T19:06:23.811Z",
+        "updatedAt": "2025-11-01T19:06:23.811Z",
+        "__v": 0
+    },
+    {
+        "_id": "69065b841524a02867794d07",
+        "heading": "🚀 Solana ETFs On Fire! 🔥",
+        "subheading": "💰 4th Straight Day of Inflows as Investors Rotate from Bitcoin & Ethereum",
+        "author": "– The Coin Cartel®",
+        "description": "<p>📊&nbsp;Solana ETFs are on a winning streak — marking four consecutive days of strong inflows amid a wave of capital rotation from Bitcoin and Ether funds. 💸</p><p>Kronos Research’s Vincent Liu predicts the trend will continue next week, showing growing investor confidence in Solana’s momentum. ⚡</p><p></p><p>#Solana #ETF #CryptoNews #AltSeason #Bitcoin #Ethereum #SOL</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1762024324/news_images/sblwu9uqbbxymvfdhfmi.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-11-01T19:12:04.978Z",
+        "updatedAt": "2025-11-01T19:12:04.978Z",
+        "__v": 0
+    },
+    {
+        "_id": "6907ad5101835ce5425d7d6b",
+        "heading": "🚀 du Unveils Cloud Miner for UAE Crypto Enthusiasts 🇦🇪 ",
+        "subheading": "Telecom giant du brings effortless crypto mining to UAE residents!",
+        "author": "– The Coin Cartel®",
+        "description": "<p>UAE’s leading telecom provider du has launched its brand-new Cloud Miner service — giving locals a simple way to join the crypto mining world without setting up any equipment.</p><p>Available exclusively for UAE residents, users can subscribe and start mining instantly through du’s secure cloud platform.</p><p></p><p>#CryptoNews #UAE #du #CloudMining #Bitcoin #Blockchain #CryptoMining #Innovation</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1762110801/news_images/gmi00dy7ofr8h5ei7qxo.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-11-02T19:13:21.674Z",
+        "updatedAt": "2025-11-04T07:13:57.916Z",
+        "__v": 0
+    },
+    {
+        "_id": "6907df906020b859a837a993",
+        "heading": "🇪🇺 Europe Eyes SEC-Style Super Regulator",
+        "subheading": "European Commission Plans Unified Oversight for Crypto & Stock Exchanges",
+        "author": "– The Coin Cartel®",
+        "description": "<p>🚀 The European Commission, backed by the European Central Bank, is planning to create a single powerful supervisor for crypto exchanges, stock markets, and clearing houses, modeled after the U.S. SEC.</p><p></p><p>This move would expand ESMA’s authority and make it easier for European firms to operate across borders without facing multiple regulators. 🌍⚖️</p><p></p><p>#CryptoNews #Europe #Regulation #ESMA #ECB #Crypto #Blockchain</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1762123663/news_images/isqp0r3bceegnajbtjuu.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-11-02T22:47:44.306Z",
+        "updatedAt": "2025-11-02T22:47:44.306Z",
+        "__v": 0
+    },
+    {
+        "_id": "6908a4bb980037905c30f792",
+        "heading": "🔥 Ethereum Stablecoin Volume Hits All-Time High! 🔥",
+        "subheading": "💥 $2.8 Trillion in Monthly Transactions — Up 45% in October! 💥",
+        "author": "– The Coin Cartel®",
+        "description": "<p>The Ethereum network just witnessed a massive surge in stablecoin activity, recording an astonishing $2.82 trillion in transaction volume for October — the highest ever! 🚀</p><p>Analysts say traders are actively hunting for yield-generating opportunities while the broader crypto market goes through a profit-taking phase.</p><p>This explosive growth highlights Ethereum’s dominance in the DeFi and stablecoin ecosystem, proving once again that liquidity and utility live on ETH! 🔥💎</p><p></p><p>#Ethereum #Stablecoins #DeFi #CryptoNews #ETH #Blockchain #Web3</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1762174139/news_images/otqjqprbxnil0uylbdt2.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-11-03T12:48:59.920Z",
+        "updatedAt": "2025-11-03T12:48:59.920Z",
+        "__v": 0
+    },
+    {
+        "_id": "6908c83bb65f8fcdd93efe4a",
+        "heading": "🚨 Spot #XRP ETFs Coming Soon! 🚀",
+        "subheading": "Major Breakthrough Expected in the Next Two Weeks",
+        "author": "– The Coin Cartel®",
+        "description": "<p>📊 According to top ETF analyst Nate Geraci, the long-awaited Spot XRP ETFs could officially debut within the next two weeks, marking a huge milestone for the #XRP community and the broader #crypto market.</p><p></p><p>A total of 8 XRP ETFs are already listed on the #DTCC operational pipeline, signaling that approvals and trading could go live very soon.</p><p>💼 #CanaryCapital is reportedly eyeing a November 13 launch, while #Bitwise may follow closely behind with a November 19–20 debut.</p><p></p><p>🔥 If these launches go as planned, it could spark a massive wave of institutional interest and potentially drive renewed momentum in XRP’s price and visibility!</p>",
+        "image": "https://res.cloudinary.com/dfnxnzq4d/image/upload/v1762183226/news_images/smezub82ce7ny3osb1zk.jpg",
+        "createdBy": "68d18a28f2866f5fc28008ad",
+        "createdAt": "2025-11-03T15:20:27.014Z",
+        "updatedAt": "2025-11-03T15:20:27.014Z",
+        "__v": 0
+    }
+]
