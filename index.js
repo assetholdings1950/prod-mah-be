@@ -22,7 +22,8 @@ function setupMiddleware(app) {
         "https://mah-agent-frontend.vercel.app",
         "https://mah-client-fe.vercel.app",
         "https://mah-admin-fe.vercel.app",
-        "https://mah-be.vercel.app"
+        "https://mah-be.vercel.app",
+        "https://agent.merlionassetholdings.com"
     ];
     app.use(cors({
         origin: function (origin, callback) {
