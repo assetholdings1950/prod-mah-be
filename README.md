@@ -125,6 +125,14 @@ JWT_EXPIRESIN=15m
 
 RESEND_API_KEY=
 HIRING_EMAIL_FROM="Merlion Asset Holdings <noreply@send.merlionassetholdings.com>"
+EMAIL_SENDING_DOMAIN=send.merlionassetholdings.com
+EMAIL_DEFAULT_FROM_PREFIX=onboarding
+# Configure a Resend Receiving-enabled subdomain to show replies in Email Center.
+EMAIL_RECEIVING_DOMAIN=reply.merlionassetholdings.com
+EMAIL_REPLY_TO=support@merlionassetholdings.com
+RESEND_WEBHOOK_SECRET=
+GMAIL_USER=
+GMAIL_APP_PASSWORD=
 HIRING_EMAIL_REPLY_TO=careers@merlionassetholdings.com
 HIRING_PORTAL_URL=http://localhost:3000/hiring
 ADMIN_EMAIL=admin@example.com

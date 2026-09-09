@@ -3,8 +3,8 @@ const nodemailer = require("nodemailer");
 const transporter = nodemailer.createTransport({
     service: "gmail",
     auth: {
-        user: "sumangal@samdigitalsolutions.digital",
-        pass: "vqxm eqpb jmlr jrjf",
+        user: process.env.GMAIL_USER,
+        pass: process.env.GMAIL_APP_PASSWORD,
     },
 });
 
@@ -29,7 +29,7 @@ const sendAdminContactMail = async (data) => {
     const displayBudget = budgetMap[budget] || budget;
 
     const mailOptions = {
-        from: `"Sam Digital Solutions" <sumangal@samdigitalsolutions.digital>`,
+        from: `"Sam Digital Solutions" <${process.env.GMAIL_USER}>`,
         to: "connect@samdigitalsolutions.digital",
         subject: "🚀 NEW LEAD: Contact Form Submission - Sam Digital Solutions",
         html: `
@@ -321,7 +321,7 @@ const sendUserWelcomeMail = async (data) => {
     } = data;
 
     const mailOptions = {
-        from: `"The Cartel Admin" <sumangal@samdigitalsolutions.digital>`,
+        from: `"The Cartel Admin" <${process.env.GMAIL_USER}>`,
         to: email,
         subject: sendPasswordMail ? "✅ Your Password Has Been Successfully Reset | The Cartel" : "✅ Your Account Has Been Successfully Created | The Cartel",
         html: `

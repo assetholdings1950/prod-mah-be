@@ -8,7 +8,7 @@ dotenv.config()
 
 const { app_configuration } = require("./config/app.config")
 const connect_mongodb = require("./connections/mongo.connection")
-const { authRoutes, roleRoutes, clientRoutes, agentRoutes, investmentPlanRoutes, cloudionaryRoutes, paymentMethodRoutes, depositRoutes, transactionRoutes, withdrawalRoutes, dashboardRoutes, contactRoutes, currencyRoutes, countryRoutes, portfolioRoutes, planChargesRoutes, cronRoutes, activityLogRoutes, accountOpeningFormRoutes, notificationRoutes, reportRoutes, jobRoutes, hiringRoutes, consultantRequestRoutes, consultRoutes, fundTrustReportRoutes, bondRoutes } = require("./routes")
+const { authRoutes, roleRoutes, clientRoutes, agentRoutes, investmentPlanRoutes, cloudionaryRoutes, paymentMethodRoutes, depositRoutes, transactionRoutes, withdrawalRoutes, dashboardRoutes, contactRoutes, currencyRoutes, countryRoutes, portfolioRoutes, planChargesRoutes, cronRoutes, activityLogRoutes, accountOpeningFormRoutes, notificationRoutes, reportRoutes, jobRoutes, hiringRoutes, consultantRequestRoutes, consultRoutes, fundTrustReportRoutes, bondRoutes, adminEmailRoutes } = require("./routes")
 const schedulePortfolioMaturityChecker = require("./cron/portfolioMaturity")
 const { scheduleSipAutoPayment } = require("./cron/sipAutoPayment")
 const { scheduleSipReminder } = require("./cron/sipReminder")
@@ -17,7 +17,14 @@ const { scheduleMasterCrons } = require("./cron/masterCron")
 
 function setupMiddleware(app) {
     dotenv.config()
-    app.use(express.json({ limit: "1024mb" }))
+    app.use(express.json({
+        limit: "1024mb",
+        verify: (req, _res, buffer) => {
+            if (req.originalUrl?.startsWith("/email-center/webhooks/resend")) {
+                req.rawBody = buffer.toString("utf8");
+            }
+        },
+    }))
     const allowedOrigins = [
         "https://mah-agent-frontend.vercel.app",
         "https://mah-client-fe.vercel.app",
@@ -72,6 +79,7 @@ function setupRoutes(app) {
     app.use("/consult", consultRoutes);
     app.use("/fund-trust-reports", fundTrustReportRoutes);
     app.use("/bonds", bondRoutes);
+    app.use("/email-center", adminEmailRoutes);
 
     app.get("/", (_req, res) => {
         return res.send({
