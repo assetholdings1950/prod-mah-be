@@ -91,11 +91,28 @@ function setupRoutes(app) {
     })
 }
 
+function setupDatabaseMiddleware(app) {
+    app.use(async (_req, res, next) => {
+        try {
+            await connect_mongodb();
+            return next();
+        } catch (error) {
+            console.error("MongoDB connection failed:", error?.message || error);
+            return res.status(503).json({
+                status: false,
+                status_code: 503,
+                message: "Database is temporarily unavailable",
+            });
+        }
+    });
+}
+
 
 
 const app = express()
 const server = http.createServer(app)
 setupMiddleware(app)
+setupDatabaseMiddleware(app)
 setupRoutes(app)
 
 // On Vercel the app is imported as a serverless function — skip listen().
@@ -107,13 +124,6 @@ if (!process.env.VERCEL) {
         scheduleMasterCrons()
     }).catch(() => {
         console.log('could not start the server')
-    })
-} else {
-    // Still connect to MongoDB for serverless invocations
-    connect_mongodb().then(() => {
-        console.log('MongoDB connected (Vercel serverless)')
-    }).catch((err) => {
-        console.error('MongoDB connection failed:', err)
     })
 }
 
