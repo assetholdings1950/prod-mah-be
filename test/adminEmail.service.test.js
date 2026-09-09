@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
     normalizeEmailList,
+    extractLatestReply,
     validatePayload,
 } = require("../services/adminEmail.service");
 
@@ -9,6 +10,27 @@ test("normalizeEmailList accepts delimited strings and removes duplicates", () =
     assert.deepEqual(
         normalizeEmailList("ONE@example.com, two@example.com; one@example.com"),
         ["one@example.com", "two@example.com"],
+    );
+});
+
+test("extractLatestReply removes Proton signature and quoted history", () => {
+    const body = `is this good right now ? did not hear from you
+
+Sent with [Proton Mail](https://proton.me/mail/home) secure email.
+
+On Wednesday, 9 September 2026 at 3:24 PM, Client <client@example.com> wrote:
+
+> an older reply
+>
+> the original message`;
+
+    assert.equal(extractLatestReply(body), "is this good right now ? did not hear from you");
+});
+
+test("extractLatestReply preserves ordinary multiline content", () => {
+    assert.equal(
+        extractLatestReply("Hello admin,\n\nHere is my requested document."),
+        "Hello admin,\n\nHere is my requested document.",
     );
 });
 

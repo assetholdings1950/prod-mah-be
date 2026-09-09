@@ -58,6 +58,28 @@ const stripHtml = (value) =>
         .replace(/\s+/g, " ")
         .trim();
 
+const extractLatestReply = (value) => {
+    const lines = String(value || "").replace(/\r\n/g, "\n").split("\n");
+    const quoteStart = lines.findIndex((line) => {
+        const trimmed = line.trim();
+        return (
+            /^>/.test(trimmed) ||
+            /^-{2,}\s*original message\s*-{2,}$/i.test(trimmed) ||
+            /^on .+ wrote:\s*$/i.test(trimmed) ||
+            /^_{5,}$/.test(trimmed)
+        );
+    });
+    const latest = quoteStart >= 0 ? lines.slice(0, quoteStart) : lines;
+    const automaticSignature = /^(sent with\s+(?:\[[^\]]+\]\([^)]*\)|\S+)(?:\s+secure email\.?)?|sent from my\s+(?:iphone|ipad|android)|get outlook for\s+(?:ios|android))$/i;
+
+    while (latest.length && !latest[latest.length - 1].trim()) latest.pop();
+    while (latest.length && automaticSignature.test(latest[latest.length - 1].trim())) {
+        latest.pop();
+        while (latest.length && !latest[latest.length - 1].trim()) latest.pop();
+    }
+    return latest.join("\n").trim() || String(value || "").trim();
+};
+
 const extractMailbox = (value) => {
     const normalized = String(value || "").trim().toLowerCase();
     const angleAddress = normalized.match(/<([^<>]+)>/);
@@ -395,8 +417,8 @@ const resolveAttachment = async ({ messageId, attachmentId }) => {
 const extractReplyToken = (addresses = []) => {
     const receivingDomain = getReceivingDomain();
     if (!receivingDomain) return "";
-    for (const address of addresses) {
-        const match = extractMailbox(address).match(new RegExp(`^thread\\+([a-f0-9]{32})@${receivingDomain.replace(/\./g, "\\.")}$`));
+    for (const address of normalizeEmailList(addresses)) {
+        const match = address.match(new RegExp(`^thread\\+([a-f0-9]{32})@${receivingDomain.replace(/\./g, "\\.")}$`));
         if (match) return match[1];
     }
     return "";
@@ -416,43 +438,47 @@ const handleInbound = async (event) => {
     const response = await resend.emails.receiving.get(providerEmailId);
     if (response.error) throw new Error(response.error.message || "Could not retrieve received email");
     const email = response.data;
-    const replyToken = extractReplyToken(email.to || event.data.to || []);
+    const inboundRecipients = [
+        ...normalizeEmailList(email.to || []),
+        ...normalizeEmailList(event.data.to || []),
+        ...normalizeEmailList(event.data.received_for || []),
+    ];
+    const replyToken = extractReplyToken(inboundRecipients);
+    if (!replyToken) return;
     const inboundFrom = normalizeEmailList(email.from || event.data.from)[0] || String(email.from || event.data.from).toLowerCase();
-    let thread = replyToken ? await AdminEmailThread.findOne({ replyToken }) : null;
-    if (!thread) {
-        thread = await AdminEmailThread.create({
-            subject: String(email.subject || "(no subject)").replace(/^re:\s*/i, "").slice(0, 200),
-            participants: [inboundFrom],
-            replyToken: crypto.randomBytes(16).toString("hex"),
-            lastDirection: "inbound",
-            createdBy: { email: "inbound@resend" },
+    const thread = await AdminEmailThread.findOne({ replyToken });
+    if (!thread) return;
+    const fullBodyText = String(email.text || stripHtml(email.html) || "(No message body)");
+    const bodyText = extractLatestReply(fullBodyText).slice(0, 100000);
+    try {
+        await AdminEmailMessage.create({
+            thread: thread._id,
+            direction: "inbound",
+            from: email.headers?.from || email.from,
+            to: [...new Set(inboundRecipients)],
+            cc: normalizeEmailList(email.cc || []),
+            bcc: normalizeEmailList(email.bcc || []),
+            subject: String(email.subject || thread.subject).slice(0, 200),
+            bodyText,
+            bodyHtml: String(email.html || "").slice(0, 250000),
+            attachments: (email.attachments || []).map((attachment) => ({
+                providerAttachmentId: attachment.id,
+                filename: attachment.filename || "attachment",
+                contentType: attachment.content_type,
+                size: attachment.size || 0,
+                disposition: attachment.content_disposition === "inline" ? "inline" : "attachment",
+            })),
+            providerEmailId,
+            internetMessageId: email.message_id || event.data.message_id || "",
+            inReplyTo: email.headers?.["in-reply-to"] || "",
+            status: "received",
+            receivedAt: new Date(email.created_at || event.created_at || Date.now()),
+            deliveryEvents: [{ type: "email.received", at: new Date(event.created_at || Date.now()) }],
         });
+    } catch (error) {
+        if (error?.code === 11000) return;
+        throw error;
     }
-    const bodyText = String(email.text || stripHtml(email.html) || "(No message body)").slice(0, 100000);
-    await AdminEmailMessage.create({
-        thread: thread._id,
-        direction: "inbound",
-        from: email.headers?.from || email.from,
-        to: normalizeEmailList(email.to || []),
-        cc: normalizeEmailList(email.cc || []),
-        bcc: normalizeEmailList(email.bcc || []),
-        subject: String(email.subject || thread.subject).slice(0, 200),
-        bodyText,
-        bodyHtml: String(email.html || "").slice(0, 250000),
-        attachments: (email.attachments || []).map((attachment) => ({
-            providerAttachmentId: attachment.id,
-            filename: attachment.filename || "attachment",
-            contentType: attachment.content_type,
-            size: attachment.size || 0,
-            disposition: attachment.content_disposition === "inline" ? "inline" : "attachment",
-        })),
-        providerEmailId,
-        internetMessageId: email.message_id || event.data.message_id || "",
-        inReplyTo: email.headers?.["in-reply-to"] || "",
-        status: "received",
-        receivedAt: new Date(email.created_at || event.created_at || Date.now()),
-        deliveryEvents: [{ type: "email.received", at: new Date(event.created_at || Date.now()) }],
-    });
     thread.participants = [...new Set([...thread.participants, inboundFrom])];
     thread.lastDirection = "inbound";
     thread.lastSnippet = bodyText.slice(0, 240);
@@ -503,5 +529,6 @@ module.exports = {
     handleResendWebhook,
     validatePayload,
     normalizeEmailList,
+    extractLatestReply,
     getSendingDomain,
 };
