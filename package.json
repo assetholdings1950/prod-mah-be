@@ -6,6 +6,7 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:cron": "node --test test/masterCron.test.js",
     "test:hiring": "node --test test/assignmentTemplate.model.test.js test/hiringModels.test.js test/hiringEmail.test.js test/jobFilter.test.js",
+    "test:email-center": "node --test test/adminEmail.service.test.js",
     "test:fund-reports": "node --test test/fundTrustReport.model.test.js",
     "start": "nodemon index.js",
     "create-admin": "node scripts/create-admin.js",

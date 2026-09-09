@@ -1,31 +1,24 @@
 const nodemailer = require("nodemailer");
 
-const transporter = nodemailer.createTransport(
-    (process.env.ZOHO_USER && process.env.ZOHO_PASS)
-        ? {
-            host: "smtp.zoho.in",
-            port: 587,
-            secure: false,
-            auth: {
-                user: process.env.ZOHO_USER,
-                pass: process.env.ZOHO_PASS
-            }
-        }
-        : {
-            service: "gmail",
-            auth: {
-                user: "sumangal@samdigitalsolutions.digital",
-                pass: "vqxm eqpb jmlr jrjf",
-            }
-        }
-);
+const transporter = nodemailer.createTransport({
+    host: "smtp.zoho.in",
+    port: 587,
+    secure: false,
+    auth: {
+        user: process.env.ZOHO_USER,
+        pass: process.env.ZOHO_PASS,
+    },
+});
 /**
  * Send admin notification when new member is created
  * @param {Object} member - Newly created member object
  */
 const sendNewMemberMail = async (member) => {
-    console.log({ member }, process.env.ZOHO_USER, process.env.ZOHO_PASS)
-    const fromEmail = process.env.ZOHO_USER || "sumangal@samdigitalsolutions.digital";
+    if (!process.env.ZOHO_USER || !process.env.ZOHO_PASS) {
+        console.warn("New member email skipped: Zoho SMTP is not configured");
+        return;
+    }
+    const fromEmail = process.env.ZOHO_USER;
     try {
         const mailOptions = {
             from: `"The Cartel Ai Community" <${fromEmail}>`,

@@ -25,6 +25,7 @@ const consultantRequestRoutes = require("./consultantRequest.routes")
 const consultRoutes = require("./consult.routes")
 const fundTrustReportRoutes = require("./fundTrustReport.routes")
 const bondRoutes = require("./bond.routes")
+const adminEmailRoutes = require("./adminEmail.routes")
 
 module.exports = {
     authRoutes,
@@ -54,4 +55,5 @@ module.exports = {
     consultRoutes,
     fundTrustReportRoutes,
     bondRoutes,
+    adminEmailRoutes,
 }
