@@ -8,7 +8,7 @@ dotenv.config()
 
 const { app_configuration } = require("./config/app.config")
 const connect_mongodb = require("./connections/mongo.connection")
-const { authRoutes, roleRoutes, clientRoutes, agentRoutes, investmentPlanRoutes, cloudionaryRoutes, paymentMethodRoutes, depositRoutes, transactionRoutes, withdrawalRoutes, dashboardRoutes, contactRoutes, currencyRoutes, countryRoutes, portfolioRoutes, planChargesRoutes, cronRoutes, activityLogRoutes, accountOpeningFormRoutes, notificationRoutes, reportRoutes, jobRoutes, hiringRoutes, consultantRequestRoutes, consultRoutes, fundTrustReportRoutes } = require("./routes")
+const { authRoutes, roleRoutes, clientRoutes, agentRoutes, investmentPlanRoutes, cloudionaryRoutes, paymentMethodRoutes, depositRoutes, transactionRoutes, withdrawalRoutes, dashboardRoutes, contactRoutes, currencyRoutes, countryRoutes, portfolioRoutes, planChargesRoutes, cronRoutes, activityLogRoutes, accountOpeningFormRoutes, notificationRoutes, reportRoutes, jobRoutes, hiringRoutes, consultantRequestRoutes, consultRoutes, fundTrustReportRoutes, bondRoutes } = require("./routes")
 const schedulePortfolioMaturityChecker = require("./cron/portfolioMaturity")
 const { scheduleSipAutoPayment } = require("./cron/sipAutoPayment")
 const { scheduleSipReminder } = require("./cron/sipReminder")
@@ -71,6 +71,7 @@ function setupRoutes(app) {
     app.use("/consultant", consultantRequestRoutes);
     app.use("/consult", consultRoutes);
     app.use("/fund-trust-reports", fundTrustReportRoutes);
+    app.use("/bonds", bondRoutes);
 
     app.get("/", (_req, res) => {
         return res.send({

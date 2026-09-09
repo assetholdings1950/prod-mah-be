@@ -48,7 +48,7 @@ const generateSignatureForBrandLogo = async (req, res) => {
 const generateAdminAssetSignature = async (req, res) => {
     try {
         const { uniqueId, main_folder_name: requestedFolder } = req.body;
-        const allowedFolders = new Set(["investments-plans", "payment-methods"]);
+        const allowedFolders = new Set(["investments-plans", "payment-methods", "bonds"]);
 
         if (!uniqueId || !requestedFolder) {
             return res.status(400).json({
