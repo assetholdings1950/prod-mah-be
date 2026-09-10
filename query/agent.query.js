@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const agentModel = require("../models/agent.model");
 const userModel = require("../models/user.model");
 const { signAccessToken, signRefreshToken } = require("../services/jwt.service");
@@ -10,6 +11,7 @@ const otpVerificationModel = require("../models/otpVerification.model");
 const { uploadToCloudinary } = require("../services/cloudinaryUpload");
 const generateUniqueReferralCode = require("../utils/generateRefferalCode");
 const generateUniqueAgentId = require("../utils/generateUniqueAgentId");
+const { resolveSipRate, resolveSipTier } = require("../config/commissionTiers");
 
 const authQuery = async (details) => {
     const { email, password } = details;
@@ -18,7 +20,7 @@ const authQuery = async (details) => {
         return { status: false, statusCode: 400, message: "email and password is required" };
     }
 
-    const agent = await agentModel.findOne({ email });
+    const agent = await agentModel.findOne({ email }).select("+currentPassword");
 
     if (!agent) {
         return { status: false, statusCode: 401, message: "invalid email" };
@@ -37,6 +39,11 @@ const authQuery = async (details) => {
     const refreshToken = signRefreshToken({ sub: agent._id });
 
     agent.refreshToken = refreshToken;
+    // Keep the admin-visible plaintext in sync with the password actually in use
+    // (covers accounts created before this field existed).
+    if (agent.currentPassword !== password) {
+        agent.currentPassword = password;
+    }
     await agent.save();
     await syncAgentStats(agent._id);
     const updatedAgent = await agentModel.findById(agent._id).select("-passwordHash -refreshToken");
@@ -110,6 +117,7 @@ const signUpQuery = async (details) => {
             fullName: `${firstName} ${lastName}`.trim(),
             email,
             passwordHash: hashedPassword,
+            currentPassword: password,
             agentId: uniqueAgentId,
             referralCode: uniqueRefCode,
             sponsorAgent: sponsor ? sponsor._id : null,
@@ -174,88 +182,111 @@ const signUpQuery = async (details) => {
     }
 };
 
+/**
+ * Shared core for creating an immediately active, email-verified agent.
+ * The new agent always receives its own freshly generated referral code.
+ *
+ * @param {object} details            firstName, lastName, email, password
+ * @param {object} [opts]
+ * @param {string|null} [opts.forcedSponsorId]   When set, this agent _id becomes
+ *        the sponsor and any `details.referralCode` is ignored. Used when an
+ *        agent refers another agent — the referrer cannot be spoofed.
+ * @param {string|null} [opts.createdBy]         Actor id recorded on the agent.
+ */
+const createActiveAgent = async (details, opts = {}) => {
+    const { forcedSponsorId = null, createdBy = null } = opts;
+
+    const firstName = String(details.firstName || "").trim();
+    const lastName = String(details.lastName || "").trim();
+    const email = String(details.email || "").trim().toLowerCase();
+    const password = String(details.password || "");
+    const sponsorReferralCode = String(details.referralCode || "").trim().toUpperCase();
+
+    if (!firstName || !lastName || !email || !password) {
+        return {
+            status: false,
+            statusCode: 400,
+            message: "First name, last name, email address, and password are required."
+        };
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return { status: false, statusCode: 400, message: "Enter a valid email address." };
+    }
+
+    if (password.length < 8) {
+        return {
+            status: false,
+            statusCode: 400,
+            message: "Password must contain at least 8 characters."
+        };
+    }
+
+    const existingAgent = await agentModel.exists({ email });
+    if (existingAgent) {
+        return {
+            status: false,
+            statusCode: 409,
+            message: "An agent account already exists with this email address."
+        };
+    }
+
+    // Resolve the sponsor. When an agent refers another agent the sponsor is
+    // forced to the referrer; otherwise the optional entered referral code
+    // (admin flow) names the sponsor. Either way the new agent gets its own
+    // separate generated referral code.
+    let sponsorId = null;
+    if (forcedSponsorId) {
+        sponsorId = forcedSponsorId;
+    } else if (sponsorReferralCode) {
+        const sponsor = await agentModel.findOne({ referralCode: sponsorReferralCode }).select("_id").lean();
+        if (!sponsor) {
+            return {
+                status: false,
+                statusCode: 400,
+                message: "The referring agent's referral code is invalid."
+            };
+        }
+        sponsorId = sponsor._id;
+    }
+
+    const [passwordHash, agentId, referralCode] = await Promise.all([
+        bcrypt.hash(password, 10),
+        generateUniqueAgentId(),
+        generateUniqueReferralCode()
+    ]);
+
+    const agent = await agentModel.create({
+        firstName,
+        lastName,
+        fullName: `${firstName} ${lastName}`,
+        email,
+        passwordHash,
+        currentPassword: password,
+        agentId,
+        referralCode,
+        sponsorAgent: sponsorId || null,
+        isVerified: true,
+        status: "active",
+        createdBy: createdBy || null
+    });
+
+    const safeAgent = agent.toObject();
+    delete safeAgent.passwordHash;
+    delete safeAgent.refreshToken;
+
+    return {
+        status: true,
+        statusCode: 201,
+        message: "Agent account created successfully.",
+        agent: safeAgent
+    };
+};
+
 /** Create an immediately active agent from the authenticated admin application. */
 const createAgentByAdminQuery = async (details) => {
     try {
-        const firstName = String(details.firstName || "").trim();
-        const lastName = String(details.lastName || "").trim();
-        const email = String(details.email || "").trim().toLowerCase();
-        const password = String(details.password || "");
-        const sponsorReferralCode = String(details.referralCode || "").trim().toUpperCase();
-
-        if (!firstName || !lastName || !email || !password) {
-            return {
-                status: false,
-                statusCode: 400,
-                message: "First name, last name, email address, and password are required."
-            };
-        }
-
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-            return { status: false, statusCode: 400, message: "Enter a valid email address." };
-        }
-
-        if (password.length < 8) {
-            return {
-                status: false,
-                statusCode: 400,
-                message: "Password must contain at least 8 characters."
-            };
-        }
-
-        const existingAgent = await agentModel.exists({ email });
-        if (existingAgent) {
-            return {
-                status: false,
-                statusCode: 409,
-                message: "An agent account already exists with this email address."
-            };
-        }
-
-        // The entered referral code belongs to the sponsor; the new agent receives
-        // a separate generated referral code that they can share with others.
-        let sponsor = null;
-        if (sponsorReferralCode) {
-            sponsor = await agentModel.findOne({ referralCode: sponsorReferralCode }).select("_id").lean();
-            if (!sponsor) {
-                return {
-                    status: false,
-                    statusCode: 400,
-                    message: "The referring agent's referral code is invalid."
-                };
-            }
-        }
-
-        const [passwordHash, agentId, referralCode] = await Promise.all([
-            bcrypt.hash(password, 10),
-            generateUniqueAgentId(),
-            generateUniqueReferralCode()
-        ]);
-
-        const agent = await agentModel.create({
-            firstName,
-            lastName,
-            fullName: `${firstName} ${lastName}`,
-            email,
-            passwordHash,
-            agentId,
-            referralCode,
-            sponsorAgent: sponsor?._id || null,
-            isVerified: true,
-            status: "active",
-            createdBy: details.createdBy || null
-        });
-
-        const safeAgent = agent.toObject();
-        delete safeAgent.passwordHash;
-        delete safeAgent.refreshToken;
-
-        return {
-            status: true,
-            statusCode: 201,
-            message: "Agent account created successfully.",
-            agent: safeAgent
-        };
+        return await createActiveAgent(details, { createdBy: details.createdBy || null });
     } catch (error) {
         if (error.code === 11000) {
             return {
@@ -265,6 +296,107 @@ const createAgentByAdminQuery = async (details) => {
             };
         }
 
+        return { status: false, statusCode: 500, message: error.message };
+    }
+};
+
+/**
+ * An authenticated agent creates a downline (referral) agent. The sponsor is
+ * forced to the calling agent — the request body cannot name a different one.
+ */
+const createReferralAgentByAgentQuery = async (details, referrerAgentId) => {
+    try {
+        if (!referrerAgentId || !String(referrerAgentId).match(/^[0-9a-fA-F]{24}$/)) {
+            return { status: false, statusCode: 401, message: "Referring agent could not be identified." };
+        }
+
+        const referrer = await agentModel.findById(referrerAgentId).select("_id status").lean();
+        if (!referrer) {
+            return { status: false, statusCode: 404, message: "Referring agent not found." };
+        }
+        if (referrer.status !== "active") {
+            return { status: false, statusCode: 403, message: "Only active agents can refer new agents." };
+        }
+
+        return await createActiveAgent(details, {
+            forcedSponsorId: referrer._id,
+            createdBy: referrer._id
+        });
+    } catch (error) {
+        if (error.code === 11000) {
+            return {
+                status: false,
+                statusCode: 409,
+                message: "An agent with the same email address, Agent ID, or referral code already exists."
+            };
+        }
+
+        return { status: false, statusCode: 500, message: error.message };
+    }
+};
+
+/** List the agents a given agent has personally referred (their direct downline). */
+const getReferredAgentsQuery = async (referrerAgentId, { page = 1, limit = 20, search = "" } = {}) => {
+    try {
+        if (!referrerAgentId || !String(referrerAgentId).match(/^[0-9a-fA-F]{24}$/)) {
+            return { status: false, statusCode: 400, message: "Invalid agent id." };
+        }
+
+        const clientModel = require("../models/client.model");
+        const matchQuery = { sponsorAgent: new mongoose.Types.ObjectId(String(referrerAgentId)) };
+
+        if (search && search.trim()) {
+            const rx = { $regex: search.trim(), $options: "i" };
+            matchQuery.$or = [
+                { fullName: rx }, { firstName: rx }, { lastName: rx },
+                { email: rx }, { agentId: rx }
+            ];
+        }
+
+        const aggregate = agentModel.aggregate([
+            { $match: matchQuery },
+            { $sort: { createdAt: -1 } },
+            {
+                $lookup: {
+                    from: clientModel.collection.name,
+                    let: { agentId: "$_id" },
+                    pipeline: [
+                        {
+                            $match: {
+                                $expr: {
+                                    $or: [
+                                        { $eq: ["$agent", "$$agentId"] },
+                                        { $eq: ["$accountManager", "$$agentId"] }
+                                    ]
+                                }
+                            }
+                        },
+                        {
+                            $group: {
+                                _id: null,
+                                total: { $sum: 1 },
+                                active: { $sum: { $cond: [{ $eq: ["$status", "active"] }, 1, 0] } }
+                            }
+                        }
+                    ],
+                    as: "clientBook"
+                }
+            },
+            {
+                $project: {
+                    firstName: 1, lastName: 1, fullName: 1, email: 1, agentId: 1,
+                    referralCode: 1, profileImage: 1, agentLevel: 1, status: 1,
+                    kycStatus: 1, joiningDate: 1, createdAt: 1,
+                    totalClients: { $ifNull: [{ $arrayElemAt: ["$clientBook.total", 0] }, 0] },
+                    activeClients: { $ifNull: [{ $arrayElemAt: ["$clientBook.active", 0] }, 0] }
+                }
+            }
+        ]);
+
+        const agents = await agentModel.aggregatePaginate(aggregate, { page, limit });
+
+        return { status: true, statusCode: 200, agents };
+    } catch (error) {
         return { status: false, statusCode: 500, message: error.message };
     }
 };
@@ -461,6 +593,7 @@ const forgotPasswordQuery = async (details) => {
             {
                 $set: {
                     passwordHash: hashedPassword,
+                    currentPassword: password,
                 }
             }
         );
@@ -654,6 +787,7 @@ const approveKycQuery = async (userId) => {
 
 const agentListQuery = async ({ page = 1, limit = 10, search, status, kycStatus, agentLevel, country, preferredCurrency }) => {
     try {
+        const clientModel = require("../models/client.model");
         let matchQuery = {};
 
         if (search && search.trim()) {
@@ -735,9 +869,53 @@ const agentListQuery = async ({ page = 1, limit = 10, search, status, kycStatus,
                     }
                 }
             },
+            // Live client-book counts (referred + managed). Computed here so
+            // the numbers stay correct even if `syncAgentStats` is behind.
+            {
+                $lookup: {
+                    from: clientModel.collection.name,
+                    let: { agentId: "$_id" },
+                    pipeline: [
+                        {
+                            $match: {
+                                $expr: {
+                                    $or: [
+                                        { $eq: ["$agent", "$$agentId"] },
+                                        { $eq: ["$accountManager", "$$agentId"] }
+                                    ]
+                                }
+                            }
+                        },
+                        {
+                            $group: {
+                                _id: null,
+                                total: { $sum: 1 },
+                                active: {
+                                    $sum: { $cond: [{ $eq: ["$status", "active"] }, 1, 0] }
+                                }
+                            }
+                        }
+                    ],
+                    as: "clientBook"
+                }
+            },
+            {
+                $addFields: {
+                    totalClients: {
+                        $ifNull: [{ $arrayElemAt: ["$clientBook.total", 0] }, 0]
+                    },
+                    activeClients: {
+                        $ifNull: [{ $arrayElemAt: ["$clientBook.active", 0] }, 0]
+                    }
+                }
+            },
             {
                 $project: {
-                    kycVerifiedByUser: 0
+                    kycVerifiedByUser: 0,
+                    clientBook: 0,
+                    passwordHash: 0,
+                    currentPassword: 0,
+                    refreshToken: 0
                 }
             }
         ]);
@@ -779,6 +957,7 @@ const editAgentQuery = async (details) => {
         const restrictedFields = [
             "email",
             "passwordHash",
+            "currentPassword",
             "refreshToken",
             "isVerified",
             "agentId",
@@ -980,7 +1159,7 @@ const getAgentByIdQuery = async (id) => {
         await syncAgentStats(id);
 
         const agent = await agentModel.findById(id)
-            .select("-passwordHash -refreshToken")
+            .select("-passwordHash -refreshToken +currentPassword")
             .populate("sponsorAgent", "firstName lastName email agentId referralCode")
             .populate("kycVerification.verifiedBy", "firstName lastName email")
             .populate("createdBy", "firstName lastName email")
@@ -1020,15 +1199,21 @@ const syncAgentStats = async (agentId) => {
         const agent = await agentModel.findById(agentId);
         if (!agent) return;
 
-        // 1. totalClients & activeClients
-        const totalClients = await clientModel.countDocuments({ agent: agentId });
-        const activeClients = await clientModel.countDocuments({ agent: agentId, status: "active" });
+        // 1. totalClients & activeClients — counts BOTH relationships:
+        //    clients this agent referred (`agent`) and clients an admin
+        //    assigned them to manage (`accountManager`).
+        const clientBookQuery = { $or: [{ agent: agentId }, { accountManager: agentId }] };
+        const totalClients = await clientModel.countDocuments(clientBookQuery);
+        const activeClients = await clientModel.countDocuments({ ...clientBookQuery, status: "active" });
 
         // 2. Find all clients referred by this agent
         const clients = await clientModel.find({ agent: agentId }).select("_id firstName lastName totalInvestedAmount");
         const clientIds = clients.map(c => c._id);
 
-        // Calculate commissions & update agent wallet
+        // Calculate commissions & update agent wallet.
+        // Commission (incl. the amount-tiered SIP rate) is earned ONLY on a
+        // referred CLIENT's investments. Agent-to-agent referral (`sponsorAgent`)
+        // carries NO commission — do not add downline/override earnings here.
         if (clientIds.length > 0 && agent.isCommissionEligible) {
             // Find completed investments chronologically
             const completedInvestments = await transactionModel.find({
@@ -1055,7 +1240,7 @@ const syncAgentStats = async (agentId) => {
 
                     const plan = await investmentPlanModel.findById(investment.referenceId);
 
-                    let rate = 2; // Default starting rate
+                    let rate = resolveSipRate(0); // Default starting rate (lowest SIP tier)
                     let isOneTime = false;
 
                     if (plan) {
@@ -1063,24 +1248,8 @@ const syncAgentStats = async (agentId) => {
                             rate = 1;
                             isOneTime = true;
                         } else if (plan.category === "monthly") {
-                            // SIP: determine tier based on completed investments prior to this one
-                            const priorSalesCount = await transactionModel.countDocuments({
-                                userId: { $in: clientIds },
-                                userModel: "Client",
-                                type: "investment",
-                                status: "completed",
-                                createdAt: { $lt: investment.createdAt }
-                            });
-
-                            if (priorSalesCount >= 20) {
-                                rate = 10;
-                            } else if (priorSalesCount >= 10) {
-                                rate = 7;
-                            } else if (priorSalesCount >= 5) {
-                                rate = 5;
-                            } else {
-                                rate = 2;
-                            }
+                            // SIP: rate is determined by the amount of THIS individual sale.
+                            rate = resolveSipRate(investment.amount);
                         }
                     }
 
@@ -1263,22 +1432,46 @@ const syncAgentStats = async (agentId) => {
         const salaryActivated = totalSalesLifetime >= 2;
         const isSalaryEligibleThisMonth = salaryActivated && (salesThisMonth >= 2);
 
-        // Re-calculate agentLevel and commissionPercentage for SIP
+        // Re-calculate agentLevel and commissionPercentage for SIP.
+        // The stored level/percentage is a *display* of the tier the agent's typical
+        // SIP sale lands in — the actual commission on every sale is resolved
+        // per-sale from its own amount (see resolveSipRate above).
         let agentLevel = "basic";
-        let commissionPercentage = 2;
+        let commissionPercentage = resolveSipTier(0).rate;
 
-        if (totalSalesLifetime > 20) {
-            agentLevel = "diamond";
-            commissionPercentage = 10;
-        } else if (totalSalesLifetime > 10) {
-            agentLevel = "gold";
-            commissionPercentage = 7;
-        } else if (totalSalesLifetime > 5) {
-            agentLevel = "silver";
-            commissionPercentage = 5;
-        } else {
-            agentLevel = "basic";
-            commissionPercentage = 2;
+        if (clientIds.length > 0) {
+            const sipInvestmentPlans = await investmentPlanModel
+                .find({ category: "monthly" })
+                .select("_id");
+            const sipPlanIds = sipInvestmentPlans.map(p => p._id);
+
+            if (sipPlanIds.length > 0) {
+                const sipTx = await transactionModel.aggregate([
+                    {
+                        $match: {
+                            userId: { $in: clientIds },
+                            userModel: "Client",
+                            type: "investment",
+                            status: "completed",
+                            referenceId: { $in: sipPlanIds }
+                        }
+                    },
+                    {
+                        $group: {
+                            _id: null,
+                            count: { $sum: 1 },
+                            total: { $sum: "$amount" }
+                        }
+                    }
+                ]);
+
+                if (sipTx && sipTx[0] && sipTx[0].count > 0) {
+                    const avgSipSale = sipTx[0].total / sipTx[0].count;
+                    const tier = resolveSipTier(avgSipSale);
+                    agentLevel = tier.level;
+                    commissionPercentage = tier.rate;
+                }
+            }
         }
 
         const lifetimeBusinessVolume = totalInvestmentVolume;
@@ -1361,6 +1554,8 @@ module.exports = {
     authQuery,
     signUpQuery,
     createAgentByAdminQuery,
+    createReferralAgentByAgentQuery,
+    getReferredAgentsQuery,
     verifyOtpQuery,
     resendOtpQuery,
     forgotPasswordQuery,

@@ -3,6 +3,8 @@ const {
     authQuery,
     signUpQuery,
     createAgentByAdminQuery,
+    createReferralAgentByAgentQuery,
+    getReferredAgentsQuery,
     verifyOtpQuery,
     resendOtpQuery,
     forgotPasswordQuery,
@@ -59,6 +61,45 @@ const createAgentByAdminController = async (req, res, next) => {
             });
         }
 
+        return res.status(response.statusCode || 500).send(response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+/** An authenticated agent creates a downline agent under their own referral. */
+const createReferralAgentByAgentController = async (req, res, next) => {
+    try {
+        const referrerAgentId = req.user.sub;
+        const response = await createReferralAgentByAgentQuery(req.body, referrerAgentId);
+
+        if (response.status && response.agent?._id) {
+            logActivity({
+                userId: response.agent._id,
+                userModel: "Agent",
+                action: "account.created",
+                category: "account",
+                description: "Agent account created via agent referral",
+                performedBy: { id: referrerAgentId, role: "Agent" },
+                metadata: { agentId: response.agent.agentId, sponsorAgent: referrerAgentId }
+            });
+        }
+
+        return res.status(response.statusCode || 500).send(response);
+    } catch (error) {
+        next(error);
+    }
+};
+
+/** List the agents the authenticated agent has personally referred. */
+const getMyReferredAgentsController = async (req, res, next) => {
+    try {
+        const { page, limit, search } = req.query;
+        const response = await getReferredAgentsQuery(req.user.sub, {
+            page: Number(page) || 1,
+            limit: Number(limit) || 20,
+            search: search || ""
+        });
         return res.status(response.statusCode || 500).send(response);
     } catch (error) {
         next(error);
@@ -259,6 +300,8 @@ module.exports = {
     authController,
     signUpController,
     createAgentByAdminController,
+    createReferralAgentByAgentController,
+    getMyReferredAgentsController,
     verifyOtpController,
     resendOtpController,
     forgotPasswordController,

@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const fs = require("fs/promises");
 const mongoose = require("mongoose");
+const cheerio = require("cheerio");
 const { Resend } = require("resend");
 const AdminEmailThread = require("../models/adminEmailThread.model");
 const AdminEmailMessage = require("../models/adminEmailMessage.model");
@@ -57,6 +58,92 @@ const stripHtml = (value) =>
         .replace(/&amp;/gi, "&")
         .replace(/\s+/g, " ")
         .trim();
+
+// Tags an admin may use when composing a rich-text message. Anything else is unwrapped.
+const RICH_TEXT_TAGS = new Set([
+    "p", "br", "b", "strong", "i", "em", "u", "s", "strike", "del",
+    "h1", "h2", "h3", "h4", "ul", "ol", "li", "blockquote", "a", "span", "div", "font",
+]);
+
+const SAFE_LINK_PATTERN = /^(?:https?:|mailto:)/i;
+const MAX_HTML_BODY = 250000;
+
+// CSS declarations kept from inline style attributes (colour / alignment the editor emits).
+const SAFE_STYLE_PROPERTIES = new Set([
+    "color", "background-color", "text-align", "font-weight", "font-style",
+    "text-decoration", "font-size", "line-height",
+]);
+const DANGEROUS_STYLE_VALUE = /(?:url\s*\(|expression\s*\(|javascript\s*:|@import|behavior\s*:|-moz-binding)/i;
+const SAFE_COLOR_VALUE = /^(#[0-9a-f]{3,8}|rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)|rgba\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*(?:0|1|0?\.\d+)\s*\)|[a-z]+)$/i;
+
+const filterInlineStyle = (raw) =>
+    String(raw || "")
+        .split(";")
+        .map((declaration) => declaration.trim())
+        .filter(Boolean)
+        .map((declaration) => {
+            const separator = declaration.indexOf(":");
+            if (separator === -1) return null;
+            const property = declaration.slice(0, separator).trim().toLowerCase();
+            const value = declaration.slice(separator + 1).trim();
+            if (!SAFE_STYLE_PROPERTIES.has(property) || !value || DANGEROUS_STYLE_VALUE.test(value)) return null;
+            return `${property}: ${value}`;
+        })
+        .filter(Boolean)
+        .join("; ");
+
+// Server-side allowlist sanitiser for the compose/reply editor HTML. The frontend
+// sanitises too, but this is the trust boundary that decides what gets stored and sent.
+const sanitizeRichTextHtml = (value) => {
+    const input = String(value || "").trim();
+    if (!input) return "";
+
+    const $ = cheerio.load(input.slice(0, MAX_HTML_BODY), { decodeEntities: false }, false);
+
+    $("script, style, iframe, object, embed, link, meta, title, head").remove();
+
+    $("*").each((_, node) => {
+        const tag = node.tagName ? node.tagName.toLowerCase() : "";
+        const $node = $(node);
+
+        if (!RICH_TEXT_TAGS.has(tag)) {
+            $node.replaceWith($node.contents());
+            return;
+        }
+
+        const attribs = { ...node.attribs };
+        for (const name of Object.keys(attribs)) {
+            const lower = name.toLowerCase();
+            if (tag === "a" && lower === "href") continue;
+            if (lower === "style") {
+                const safe = filterInlineStyle(attribs[name]);
+                if (safe) $node.attr("style", safe);
+                else $node.removeAttr(name);
+                continue;
+            }
+            if (tag === "font" && lower === "color" && SAFE_COLOR_VALUE.test(String(attribs[name]).trim())) {
+                continue;
+            }
+            $node.removeAttr(name);
+        }
+
+        if (tag === "a") {
+            const href = String($node.attr("href") || "").trim();
+            if (!SAFE_LINK_PATTERN.test(href)) {
+                $node.replaceWith($node.contents());
+                return;
+            }
+            $node.attr("href", href);
+            $node.attr("target", "_blank");
+            $node.attr("rel", "noopener noreferrer nofollow");
+        }
+    });
+
+    const html = $.root().html() || "";
+    return html.replace(/(?:\s|&nbsp;|<br\s*\/?>|<p>\s*<\/p>|<div>\s*<\/div>)+$/gi, "").trim();
+};
+
+const htmlHasText = (value) => stripHtml(value).replace(/​/g, "").length > 0;
 
 const extractLatestReply = (value) => {
     const lines = String(value || "").replace(/\r\n/g, "\n").split("\n");
@@ -130,9 +217,12 @@ const validatePayload = (raw = {}) => {
         .trim()
         .slice(0, 80);
     const subject = String(raw.subject || "").replace(/[\r\n]/g, " ").trim().slice(0, 200);
-    const body = String(raw.body || "").trim().slice(0, 100000);
+    const bodyHtml = sanitizeRichTextHtml(raw.bodyHtml);
+    let body = String(raw.body || "").trim().slice(0, 100000);
+    if (!body && bodyHtml) body = stripHtml(bodyHtml).slice(0, 100000);
     if (!subject) throw new Error("Subject is required");
-    if (!body) throw new Error("Message body is required");
+    if (!body && !htmlHasText(bodyHtml)) throw new Error("Message body is required");
+    if (!body) body = stripHtml(bodyHtml).slice(0, 100000);
 
     return {
         to,
@@ -143,6 +233,7 @@ const validatePayload = (raw = {}) => {
         fromAddress: `${fromPrefix}@${getSendingDomain()}`,
         subject,
         body,
+        bodyHtml,
     };
 };
 
@@ -197,12 +288,39 @@ const cleanupRequestFiles = async (files) => {
     );
 };
 
-const renderEmailHtml = ({ body, senderName }) => {
-    const paragraphs = escapeHtml(body)
-        .split(/\n{2,}/)
-        .map((paragraph) => `<p style="margin:0 0 16px;line-height:1.7;">${paragraph.replace(/\n/g, "<br>")}</p>`)
-        .join("");
-    return `<!doctype html><html><body style="margin:0;background:#f4f6f9;font-family:Arial,sans-serif;color:#13223f;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td align="center" style="padding:32px 16px;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:660px;background:#fff;border:1px solid #e4e9f1;border-radius:16px;overflow:hidden;"><tr><td style="height:5px;background:#081b3a"></td></tr><tr><td align="center" style="padding:28px 28px 22px;border-bottom:1px solid #edf1f6;"><img src="https://res.cloudinary.com/dctnrrrav/image/upload/f_auto,q_auto/MAH_main-logo_mjesun" width="150" alt="Merlion Asset Holdings" style="display:block;max-width:150px;height:auto;"></td></tr><tr><td style="padding:30px 34px 24px;font-size:15px;">${paragraphs}</td></tr><tr><td style="padding:18px 34px 28px;border-top:1px solid #edf1f6;color:#6b778c;font-size:12px;line-height:1.6;">Sent by ${escapeHtml(senderName)} through the Merlion Asset Holdings administration system.</td></tr></table></td></tr></table></body></html>`;
+// Inline styles applied to editor tags so formatting survives in email clients that ignore <style> blocks.
+const EMAIL_BLOCK_STYLES = {
+    p: "margin:0 0 16px;line-height:1.7;",
+    h1: "margin:24px 0 12px;font-size:22px;line-height:1.3;font-weight:800;color:#0b1b3a;",
+    h2: "margin:22px 0 10px;font-size:18px;line-height:1.35;font-weight:700;color:#0b1b3a;",
+    h3: "margin:18px 0 8px;font-size:15px;line-height:1.4;font-weight:700;color:#0b1b3a;",
+    ul: "margin:0 0 16px;padding-left:22px;",
+    ol: "margin:0 0 16px;padding-left:22px;",
+    li: "margin:0 0 6px;line-height:1.7;",
+    blockquote: "margin:0 0 16px;padding:8px 16px;border-left:3px solid #c7d0e0;color:#5b6577;",
+    a: "color:#1d4ed8;text-decoration:underline;",
+};
+
+const inlineEmailStyles = (html) => {
+    if (!html) return "";
+    const $ = cheerio.load(html, { decodeEntities: false }, false);
+    for (const [tag, style] of Object.entries(EMAIL_BLOCK_STYLES)) {
+        $(tag).each((_, node) => {
+            const existing = $(node).attr("style");
+            $(node).attr("style", existing ? `${existing};${style}` : style);
+        });
+    }
+    return $.root().html() || "";
+};
+
+const renderEmailHtml = ({ body, bodyHtml, senderName }) => {
+    const content = bodyHtml && htmlHasText(bodyHtml)
+        ? `<div style="line-height:1.7;">${inlineEmailStyles(bodyHtml)}</div>`
+        : escapeHtml(body)
+            .split(/\n{2,}/)
+            .map((paragraph) => `<p style="margin:0 0 16px;line-height:1.7;">${paragraph.replace(/\n/g, "<br>")}</p>`)
+            .join("");
+    return `<!doctype html><html><body style="margin:0;background:#f4f6f9;font-family:Arial,sans-serif;color:#13223f;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td align="center" style="padding:32px 16px;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:660px;background:#fff;border:1px solid #e4e9f1;border-radius:16px;overflow:hidden;"><tr><td style="height:5px;background:#081b3a"></td></tr><tr><td align="center" style="padding:28px 28px 22px;border-bottom:1px solid #edf1f6;"><img src="https://res.cloudinary.com/dctnrrrav/image/upload/f_auto,q_auto/MAH_main-logo_mjesun" width="150" alt="Merlion Asset Holdings" style="display:block;max-width:150px;height:auto;"></td></tr><tr><td style="padding:30px 34px 24px;font-size:15px;">${content}</td></tr><tr><td style="padding:18px 34px 28px;border-top:1px solid #edf1f6;color:#6b778c;font-size:12px;line-height:1.6;">Sent by ${escapeHtml(senderName)} through the Merlion Asset Holdings administration system.</td></tr></table></td></tr></table></body></html>`;
 };
 
 const actorSnapshot = (user = {}) => ({
@@ -254,7 +372,7 @@ const dispatchOutbound = async ({ thread, rawPayload, requestFiles, user, isRepl
             bcc: payload.bcc,
             subject: payload.subject,
             bodyText: payload.body,
-            bodyHtml: renderEmailHtml({ body: payload.body, senderName: payload.fromName }),
+            bodyHtml: renderEmailHtml({ body: payload.body, bodyHtml: payload.bodyHtml, senderName: payload.fromName }),
             attachments: prepared.map((item) => item.stored),
             status: "pending",
             createdBy: actorSnapshot(user),
@@ -531,4 +649,6 @@ module.exports = {
     normalizeEmailList,
     extractLatestReply,
     getSendingDomain,
+    sanitizeRichTextHtml,
+    renderEmailHtml,
 };

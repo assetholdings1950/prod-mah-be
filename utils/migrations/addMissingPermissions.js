@@ -2,12 +2,14 @@
 const mongoose = require('mongoose');
 // const rolesModel = require('../models/roles.model');
 const { app_configuration } = require('../../config/app.config');
+const { configureDns } = require('../../connections/mongo.connection');
 const rolesModel = require('../../models/roles.model');
 
 async function addMissingPermissions() {
     try {
         const uri = app_configuration.MONGO_DETAILS;
         if (!uri) throw new Error('MONGO_URI not set');
+        configureDns();
         await mongoose.connect(uri);
 
         console.log('Connected to MongoDB');

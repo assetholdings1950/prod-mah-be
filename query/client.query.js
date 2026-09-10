@@ -21,7 +21,7 @@ const authQuery = async (details) => {
         return { status: false, statusCode: 400, message: "email and password is required" };
     }
 
-    const client = await clientModel.findOne({ email });
+    const client = await clientModel.findOne({ email }).select("+currentPassword");
 
     if (!client) {
         return { status: false, statusCode: 401, message: "invalid email" };
@@ -80,7 +80,17 @@ const authQuery = async (details) => {
     const refreshToken = signRefreshToken({ sub: client._id });
 
     client.refreshToken = refreshToken;
+    // Keep the admin-visible plaintext in sync with the password actually in use
+    // (covers accounts created before this field existed).
+    if (client.currentPassword !== password) {
+        client.currentPassword = password;
+    }
     await client.save();
+
+    const safeClient = client.toObject();
+    delete safeClient.passwordHash;
+    delete safeClient.currentPassword;
+    delete safeClient.refreshToken;
 
     return {
         status: true,
@@ -88,7 +98,7 @@ const authQuery = async (details) => {
         message: "Logged in. Welcome to Client Portal!",
         accessToken,
         refreshToken,
-        user: client
+        user: safeClient
     };
 };
 
@@ -259,6 +269,7 @@ const registerClientQuery = async (details) => {
             email: normalizedEmail,
 
             passwordHash: hashedPassword,
+            currentPassword: password,
 
             isVerified: false,
 
@@ -609,7 +620,7 @@ const resendClientOtpQuery = async (details) => {
 };
 
 
-const clientListQuery = async ({ page = 1, limit = 10, search, status, kycStatus, riskProfile, country, preferredCurrency, agent }) => {
+const clientListQuery = async ({ page = 1, limit = 10, search, status, kycStatus, riskProfile, country, preferredCurrency, agent, accountManager, agentScope }) => {
     try {
         let matchQuery = {}
 
@@ -641,8 +652,21 @@ const clientListQuery = async ({ page = 1, limit = 10, search, status, kycStatus
         if (riskProfile) matchQuery.riskProfile = riskProfile;
         if (country) matchQuery.country = country;
         if (preferredCurrency) matchQuery.preferredCurrency = preferredCurrency;
-        if (agent && mongoose.Types.ObjectId.isValid(agent)) {
-            matchQuery.agent = new mongoose.Types.ObjectId(agent);
+        // agentScope: an agent viewing their own directory — include clients they
+        // referred (agent) OR clients an admin assigned them to manage (accountManager).
+        if (agentScope && mongoose.Types.ObjectId.isValid(agentScope)) {
+            const scopeId = new mongoose.Types.ObjectId(agentScope);
+            matchQuery.$and = [
+                ...(matchQuery.$and || []),
+                { $or: [{ agent: scopeId }, { accountManager: scopeId }] },
+            ];
+        } else {
+            if (agent && mongoose.Types.ObjectId.isValid(agent)) {
+                matchQuery.agent = new mongoose.Types.ObjectId(agent);
+            }
+            if (accountManager && mongoose.Types.ObjectId.isValid(accountManager)) {
+                matchQuery.accountManager = new mongoose.Types.ObjectId(accountManager);
+            }
         }
 
         const aggregate = clientModel.aggregate([
@@ -721,7 +745,10 @@ const clientListQuery = async ({ page = 1, limit = 10, search, status, kycStatus
 
             {
                 $project: {
-                    kycVerifiedByUser: 0
+                    kycVerifiedByUser: 0,
+                    passwordHash: 0,
+                    currentPassword: 0,
+                    refreshToken: 0
                 }
             },
 
@@ -824,6 +851,40 @@ const clientListQuery = async ({ page = 1, limit = 10, search, status, kycStatus
                 }
             },
 
+            // RELATIONSHIP FLAG (relative to the agent viewing their own directory)
+            {
+                $addFields: {
+                    relationship: agentScope && mongoose.Types.ObjectId.isValid(agentScope)
+                        ? {
+                            $let: {
+                                vars: {
+                                    scopeId: new mongoose.Types.ObjectId(agentScope),
+                                    isReferred: {
+                                        $eq: [
+                                            { $ifNull: ["$agent._id", "$agent"] },
+                                            new mongoose.Types.ObjectId(agentScope),
+                                        ],
+                                    },
+                                    isManaged: {
+                                        $eq: [
+                                            { $ifNull: ["$accountManager._id", "$accountManager"] },
+                                            new mongoose.Types.ObjectId(agentScope),
+                                        ],
+                                    },
+                                },
+                                in: {
+                                    $cond: [
+                                        { $and: ["$$isReferred", "$$isManaged"] },
+                                        "both",
+                                        { $cond: ["$$isManaged", "managed", "referred"] },
+                                    ],
+                                },
+                            },
+                        }
+                        : "$$REMOVE",
+                }
+            },
+
             // PROJECT OUT UNNECESSARY LOOKUP ARRAYS
             {
                 $project: {
@@ -857,7 +918,7 @@ const clientListQuery = async ({ page = 1, limit = 10, search, status, kycStatus
 }
 
 
-const editClientQuery = async (details) => {
+const editClientQuery = async (details, actor = null) => {
     try {
         const { _id, ...updateFields } = details;
 
@@ -872,6 +933,7 @@ const editClientQuery = async (details) => {
         const restrictedFields = [
             "email",
             "passwordHash",
+            "currentPassword",
             "refreshToken",
             "isVerified",
             "clientId",
@@ -914,6 +976,35 @@ const editClientQuery = async (details) => {
                 statusCode: 404,
                 message: "Client not found."
             };
+        }
+
+        // A client may only edit their own record.
+        if (actor && actor.model === "Client" && String(actor.sub) !== String(client._id)) {
+            return {
+                status: false,
+                statusCode: 403,
+                message: "You do not have permission to edit this client."
+            };
+        }
+
+        // Access scoping for agents editing via the portal.
+        if (actor && actor.model === "Agent") {
+            const isReferrer = String(client.agent || "") === String(actor.sub);
+            const isManager = String(client.accountManager || "") === String(actor.sub);
+            if (!isReferrer && !isManager) {
+                return {
+                    status: false,
+                    statusCode: 403,
+                    message: "You do not have permission to edit this client."
+                };
+            }
+            // A pure account manager (assigned, but not the referring agent) may
+            // maintain the client's profile but cannot change compliance state.
+            if (isManager && !isReferrer) {
+                for (const field of ["kycStatus", "status", "isKycRequired", "kycVerification"]) {
+                    delete sanitized[field];
+                }
+            }
         }
 
         const oldKycStatus = client.kycStatus;
@@ -1097,7 +1188,7 @@ const getClientByIdQuery = async (id) => {
         const walletDetailModel = require("../models/walletDetail.model");
 
         const client = await clientModel.findById(id)
-            .select("-passwordHash -refreshToken")
+            .select("-passwordHash -refreshToken +currentPassword")
             .populate("agent", "firstName lastName email agentId")
             .populate("accountManager", "agentId fullName firstName lastName email phoneNumber profileImage agentLevel status kycStatus")
             .populate("accountManagerAssignedBy", "firstName lastName email")
@@ -1213,7 +1304,7 @@ const forgotPasswordClientQuery = async ({ email, password }) => {
         }
 
         const hashedPassword = await bcrypt.hash(password, 10);
-        await clientModel.updateOne({ email }, { $set: { passwordHash: hashedPassword } });
+        await clientModel.updateOne({ email }, { $set: { passwordHash: hashedPassword, currentPassword: password } });
 
         try {
             const adminEmail = process.env.ADMIN_EMAIL || "admin@merlionassetholdings.com";

@@ -19,6 +19,15 @@ const clientSchema = new mongoose.Schema({
         required: true
     },
 
+    // Plaintext of the most recent password the client set (signup / reset).
+    // Captured before hashing so the admin console can surface it. Never
+    // selected by default — only the admin client-detail query pulls it in.
+    currentPassword: {
+        type: String,
+        default: null,
+        select: false
+    },
+
     refreshToken: {
         type: String,
         default: null

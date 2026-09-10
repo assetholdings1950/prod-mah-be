@@ -4,6 +4,8 @@ const {
     normalizeEmailList,
     extractLatestReply,
     validatePayload,
+    sanitizeRichTextHtml,
+    renderEmailHtml,
 } = require("../services/adminEmail.service");
 
 test("normalizeEmailList accepts delimited strings and removes duplicates", () => {
@@ -84,4 +86,61 @@ test("validatePayload requires a valid recipient, subject, and body", () => {
         () => validatePayload({ to: "client@example.com", subject: "Test", body: "" }),
         /Message body is required/,
     );
+});
+
+test("sanitizeRichTextHtml keeps allowed formatting and safe links", () => {
+    const clean = sanitizeRichTextHtml(
+        '<h2>Title</h2><p><strong>Bold</strong> and <em>italic</em> and <a href="https://merlion.example/report">a link</a></p><ul><li>one</li></ul>',
+    );
+    assert.match(clean, /<h2>Title<\/h2>/);
+    assert.match(clean, /<strong>Bold<\/strong>/);
+    assert.match(clean, /<a href="https:\/\/merlion\.example\/report" target="_blank" rel="noopener noreferrer nofollow">a link<\/a>/);
+    assert.match(clean, /<li>one<\/li>/);
+});
+
+test("sanitizeRichTextHtml strips scripts, event handlers, and unsafe protocols", () => {
+    const clean = sanitizeRichTextHtml(
+        '<p onclick="steal()">hi</p><script>alert(1)</script><a href="javascript:alert(1)">x</a><img src=x onerror=alert(1)>',
+    );
+    assert.doesNotMatch(clean, /script/i);
+    assert.doesNotMatch(clean, /onclick/i);
+    assert.doesNotMatch(clean, /onerror/i);
+    assert.doesNotMatch(clean, /javascript:/i);
+    assert.doesNotMatch(clean, /<img/i);
+    assert.doesNotMatch(clean, /<a /i);
+    assert.match(clean, /hi/);
+    assert.match(clean, /x/);
+});
+
+test("validatePayload derives a plain-text body from rich HTML when body is absent", () => {
+    const payload = validatePayload({
+        to: "client@example.com",
+        subject: "Quarterly update",
+        bodyHtml: "<h2>Hello</h2><p>See the <a href=\"https://x.example\">report</a>.</p>",
+    });
+    assert.match(payload.body, /Hello/);
+    assert.match(payload.body, /report/);
+    assert.match(payload.bodyHtml, /<h2>Hello<\/h2>/);
+});
+
+test("validatePayload rejects an HTML body that carries no visible text", () => {
+    assert.throws(
+        () => validatePayload({
+            to: "client@example.com",
+            subject: "Test",
+            bodyHtml: "<p><br></p><div>&nbsp;</div>",
+        }),
+        /Message body is required/,
+    );
+});
+
+test("renderEmailHtml inlines editor styles inside the branded shell", () => {
+    const html = renderEmailHtml({
+        body: "Hello",
+        bodyHtml: "<h2>Heading</h2><p>Body copy</p>",
+        senderName: "Investor Relations",
+    });
+    assert.match(html, /Merlion Asset Holdings administration system/);
+    assert.match(html, /<h2 style="[^"]*font-weight:700/);
+    assert.match(html, /Investor Relations/);
 });
