@@ -66,7 +66,13 @@ const resendClientOtpController = async (req, res, next) => {
 const clientListController = async (req, res, next) => {
     try {
         console.log(req.query)
-        const { page, limit, search, status, kycStatus, riskProfile, country, preferredCurrency, agent } = req.query
+        const { page, limit, search, status, kycStatus, riskProfile, country, preferredCurrency, agent, accountManager } = req.query
+
+        // An agent hitting this endpoint always sees exactly their own book:
+        // clients they referred plus clients an admin assigned them to manage.
+        // The query params they send are ignored so the scope cannot be widened.
+        const agentScope = req.user && req.user.model === "Agent" ? req.user.sub : undefined;
+
         const response = await clientListQuery({
             page: Number(page) || 1,
             limit: Number(limit) || 10,
@@ -76,7 +82,9 @@ const clientListController = async (req, res, next) => {
             riskProfile,
             country,
             preferredCurrency,
-            agent
+            agent: agentScope ? undefined : agent,
+            accountManager: agentScope ? undefined : accountManager,
+            agentScope,
         })
         return res.send(response)
     } catch (error) {
@@ -86,7 +94,10 @@ const clientListController = async (req, res, next) => {
 
 const editClientController = async (req, res, next) => {
     try {
-        const response = await editClientQuery(req.body)
+        const actor = req.user
+            ? { sub: req.user.sub, model: req.user.model, role: req.user.role }
+            : null;
+        const response = await editClientQuery(req.body, actor)
         if (response.status && req.body._id) {
             logActivity({
                 userId: req.body._id, userModel: "Client",

@@ -57,10 +57,10 @@ router.post("/bulk-reject-kyc", authenticate, requireRole(["admin", "superadmin"
 router.patch("/admin/reset-portfolio-value", authenticate, requireRole(["superadmin"]), resetPortfolioValueController);
 router.patch("/:id/account-manager", authenticate, requireRole(["admin", "superadmin"]), assignAccountManagerController);
 
-// Admin CRUD
-router.get("/", clientListController);
-router.post("/update", editClientController);
-router.delete("/", deleteClientController);
+// Admin / agent CRUD (auth required; the controllers scope agents to their own book)
+router.get("/", authenticate, clientListController);
+router.post("/update", authenticate, editClientController);
+router.delete("/", authenticate, requireRole(["admin", "superadmin"]), deleteClientController);
 
 // Bank details — static routes before /:id
 router.post("/bank-details", authenticate, (req, res, next) => {

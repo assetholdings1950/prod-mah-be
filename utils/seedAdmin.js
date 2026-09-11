@@ -2,10 +2,12 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const userModel = require('../models/user.model');
 const { app_configuration } = require('../config/app.config');
+const { configureDns } = require('../connections/mongo.connection');
 
 async function seed() {
     const uri = app_configuration.MONGO_DETAILS;
     if (!uri) throw new Error('MONGO_URI not set');
+    configureDns();
     await mongoose.connect(uri);
 
 

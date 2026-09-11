@@ -118,6 +118,7 @@ Create `.env` in the project root. Never commit real secrets.
 PORT=5000
 APP_NAME=Merlion Asset Holdings
 MONGO_URL=mongodb+srv://USER:PASSWORD@HOST/DATABASE
+MONGODB_DNS_SERVERS=1.1.1.1,8.8.8.8
 
 JWT_SECRET=replace-with-a-long-random-secret
 JWT_REFRESH_SECRET=replace-with-another-long-random-secret
@@ -701,7 +702,7 @@ GET  /cron/vercel/master/evening # Vercel + CRON_SECRET
 
 ### MongoDB
 
-MongoDB is the source of truth. `MONGO_URL` is loaded through `config/app.config.js`. Optional custom DNS servers may be configured through `MONGODB_DNS_SERVERS`.
+MongoDB is the source of truth. `MONGO_URL` is loaded through `config/app.config.js`. Optional custom DNS servers may be configured through `MONGODB_DNS_SERVERS` (comma-separated, e.g. `1.1.1.1,8.8.8.8`) — useful when the host resolver cannot resolve the `mongodb+srv` SRV records. It is applied via `dns.setServers()` in `connections/mongo.connection.js` before the connection is opened, and re-used by the standalone `scripts/*` and `utils/migrations/*` runners.
 
 ### Currency conversion
 

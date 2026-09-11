@@ -43,3 +43,4 @@ const connect_mongodb = async () => {
 };
 
 module.exports = connect_mongodb;
+module.exports.configureDns = configureDns;

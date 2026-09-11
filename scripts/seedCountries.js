@@ -5,6 +5,7 @@
 require("dotenv").config();
 const mongoose = require("mongoose");
 const { app_configuration } = require("../config/app.config");
+const { configureDns } = require("../connections/mongo.connection");
 const Country = require("../models/country.model");
 
 const COUNTRIES = [
@@ -73,6 +74,7 @@ const COUNTRIES = [
 
 async function seed() {
     try {
+        configureDns();
         await mongoose.connect(app_configuration.MONGO_DETAILS);
         console.log("Connected to MongoDB.");
 

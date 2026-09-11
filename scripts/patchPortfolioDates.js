@@ -1,5 +1,6 @@
 require("dotenv").config();
 const mongoose = require("mongoose");
+const { configureDns } = require("../connections/mongo.connection");
 const ClientPortfolio = require("../models/clientPortfolio.model");
 
 const PORTFOLIO_ID = "6a4c9fb5fba39fb23058bcbc";
@@ -9,6 +10,7 @@ const MATURITY   = new Date("2027-06-07T12:30:00.000Z");
 const NEXT_DUE   = new Date("2026-07-07T12:30:00.000Z"); // 1 month after start
 
 async function run() {
+    configureDns();
     await mongoose.connect(process.env.MONGO_URL);
     console.log("Connected to MongoDB");
 

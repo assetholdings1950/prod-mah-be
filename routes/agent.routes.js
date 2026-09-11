@@ -2,6 +2,8 @@ const express = require("express");
 const {
     authController,
     createAgentByAdminController,
+    createReferralAgentByAgentController,
+    getMyReferredAgentsController,
     verifyOtpController,
     resendOtpController,
     forgotPasswordController,
@@ -34,6 +36,18 @@ const requireRole = require("../middleware/role.middleware");
 
 const router = express.Router();
 const agentCreators = ["HR", "Hiring-Admin", "Hiring Admin", "Admin", "Super-Admin"];
+
+// Guard: the authenticated principal must be an Agent (not an admin/client token).
+const requireAgentPrincipal = (req, res, next) => {
+    if (req.user?.model !== "Agent") {
+        return res.status(403).json({
+            status: false,
+            statusCode: 403,
+            message: "This action is only available to agent accounts."
+        });
+    }
+    next();
+};
 
 // Auth
 router.post("/sign-in", authController);
@@ -80,6 +94,12 @@ router.post("/me/wallets", authenticate, (req, res, next) => {
     req.body.userId = req.user.sub;
     next();
 }, addWalletController);
+
+// ─── Agent referral network (agent refers another agent) ────────────────────
+// The new agent is created active & email-verified with the calling agent as
+// its sponsor. The sponsor is taken from the JWT, never the request body.
+router.post("/refer", authenticate, requireAgentPrincipal, createReferralAgentByAgentController);
+router.get("/me/referred-agents", authenticate, requireAgentPrincipal, getMyReferredAgentsController);
 
 // Agent Verification
 router.get("/verify/:agentId", async (req, res) => {
