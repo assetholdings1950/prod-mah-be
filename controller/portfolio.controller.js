@@ -290,14 +290,16 @@ const getAdminPortfolioListController = asyncHandler(async (req, res) => {
         startDate, endDate, sortBy, sortOrder,
     } = req.query;
 
-    // Agent security check: Agent can only list portfolios for one of their referred clients
+    // Agent security check: Agent can list portfolios for clients they referred or manage
     if (req.user && req.user.model === "Agent") {
         if (!clientId) {
             return res.status(400).json({ status: false, message: "clientId is required for Agent requests." });
         }
-        const client = await Client.findById(clientId).select("agent").lean();
-        if (!client || String(client.agent) !== String(req.user.sub)) {
-            return res.status(403).json({ status: false, message: "Forbidden - Client is not registered under your referral network." });
+        const client = await Client.findById(clientId).select("agent accountManager").lean();
+        const isReferred = client && client.agent && String(client.agent) === String(req.user.sub);
+        const isManaged = client && client.accountManager && String(client.accountManager) === String(req.user.sub);
+        if (!client || (!isReferred && !isManaged)) {
+            return res.status(403).json({ status: false, message: "Forbidden - Client is not registered or managed under your account." });
         }
     }
 
@@ -333,16 +335,75 @@ const getPortfolioDetailAdminController = asyncHandler(async (req, res) => {
         return res.status(404).json({ status: false, message: "Portfolio not found." });
     }
 
-    // Agent security check: Agent can only view details of a portfolio owned by one of their clients
+    // Agent security check: Agent can view details of a portfolio owned by one of their referred or managed clients
     if (req.user && req.user.model === "Agent") {
-        const client = await Client.findById(portfolio.clientId).select("agent").lean();
-        if (!client || String(client.agent) !== String(req.user.sub)) {
-            return res.status(403).json({ status: false, message: "Forbidden - This portfolio belongs to a client not registered under your referral network." });
+        const client = await Client.findById(portfolio.clientId).select("agent accountManager").lean();
+        const isReferred = client && client.agent && String(client.agent) === String(req.user.sub);
+        const isManaged = client && client.accountManager && String(client.accountManager) === String(req.user.sub);
+        if (!client || (!isReferred && !isManaged)) {
+            return res.status(403).json({ status: false, message: "Forbidden - This portfolio belongs to a client not registered or managed under your account." });
         }
     }
 
     return res.status(200).json({ status: true, data: portfolio });
 });
+
+// Helper: Recalculate and synchronize client investment stats and agent volume after portfolio changes
+const recalculateClientInvestmentStats = async (clientId) => {
+    if (!clientId) return null;
+    try {
+        const Client = require("../models/client.model");
+        const Transaction = require("../models/transaction.model");
+        const { syncAgentStats } = require("../query/agent.query");
+
+        const portfolios = await ClientPortfolio.find({
+            clientId,
+            status: { $nin: ["cancelled"] }
+        }).lean();
+
+        const activePortfolios = portfolios.filter(p => p.status === "active");
+        const activeInvestmentAmount = activePortfolios.reduce((sum, p) => sum + (p.amountUsd || p.amount || 0), 0);
+        const totalInvestedAmount = portfolios.reduce((sum, p) => sum + (p.amountUsd || p.amount || 0), 0);
+        const portfolioValue = activeInvestmentAmount;
+
+        const existingPortfolioIds = portfolios.map(p => p._id);
+
+        // Remove orphaned investment transactions pointing to deleted portfolios
+        await Transaction.deleteMany({
+            userId: clientId,
+            userModel: "Client",
+            type: "investment",
+            referenceId: { $nin: existingPortfolioIds }
+        });
+
+        const updatedClient = await Client.findByIdAndUpdate(
+            clientId,
+            {
+                $set: {
+                    totalInvestments: portfolios.length,
+                    activeInvestments: activePortfolios.length,
+                    totalInvestedAmount,
+                    activeInvestmentAmount,
+                    portfolioValue,
+                }
+            },
+            { new: true }
+        );
+
+        if (updatedClient) {
+            if (updatedClient.agent) {
+                await syncAgentStats(updatedClient.agent);
+            }
+            if (updatedClient.accountManager && String(updatedClient.accountManager) !== String(updatedClient.agent)) {
+                await syncAgentStats(updatedClient.accountManager);
+            }
+        }
+        return updatedClient;
+    } catch (err) {
+        console.error("Failed to recalculate client investment stats:", clientId, err);
+        return null;
+    }
+};
 
 // ── DELETE /portfolio/admin/client/:clientId (Super-admin) ───────────────────
 const deleteClientPortfoliosController = asyncHandler(async (req, res) => {
@@ -351,6 +412,8 @@ const deleteClientPortfoliosController = asyncHandler(async (req, res) => {
         return res.status(400).json({ status: false, message: "clientId is required." });
     }
     const result = await ClientPortfolio.deleteMany({ clientId });
+    await recalculateClientInvestmentStats(clientId);
+
     return res.status(200).json({
         status: true,
         message: `${result.deletedCount} portfolio record(s) deleted for client.`,
@@ -366,6 +429,8 @@ const deleteSinglePortfolioController = asyncHandler(async (req, res) => {
     if (!portfolio) {
         return res.status(404).json({ status: false, message: "Portfolio not found." });
     }
+
+    const clientId = portfolio.clientId;
 
     // Build refund map: currency → total crypto amount to credit back
     // Sum across all lots so SIP multi-installment portfolios are fully refunded
@@ -388,23 +453,46 @@ const deleteSinglePortfolioController = asyncHandler(async (req, res) => {
 
     await ClientPortfolio.findByIdAndDelete(id);
 
+    // Synchronize client and agent stats immediately
+    await recalculateClientInvestmentStats(clientId);
+
     logActivity({
         userId: portfolio.clientId, userModel: portfolio.userModel ?? "Client",
         action: "portfolio.deleted", category: "portfolio",
-        description: "Portfolio deleted by admin with wallet refund",
+        description: "Portfolio deleted by admin with wallet refund and stats synced",
         metadata: { portfolioId: id, refundMap },
         performedBy: { id: req.user.sub, role: "admin" },
     });
 
-    return res.status(200).json({ status: true, message: "Portfolio deleted and wallet credited." });
+    return res.status(200).json({ status: true, message: "Portfolio deleted, wallet credited, and stats synchronized." });
 });
 
 // ── DELETE /portfolio/admin/delete-all (Super-admin) ──────────────────────────
 const deleteAllPortfoliosController = asyncHandler(async (req, res) => {
+    const Client = require("../models/client.model");
+    const Transaction = require("../models/transaction.model");
+    const Agent = require("../models/agent.model");
+    const { syncAgentStats } = require("../query/agent.query");
+
     const result = await ClientPortfolio.deleteMany({});
+    await Transaction.deleteMany({ userModel: "Client", type: "investment" });
+
+    await Client.updateMany({}, {
+        $set: {
+            totalInvestments: 0,
+            activeInvestments: 0,
+            totalInvestedAmount: 0,
+            activeInvestmentAmount: 0,
+            portfolioValue: 0
+        }
+    });
+
+    const agents = await Agent.find({}).select("_id");
+    await Promise.all(agents.map(a => syncAgentStats(a._id)));
+
     return res.status(200).json({
         status: true,
-        message: `${result.deletedCount} portfolio record(s) deleted.`,
+        message: `${result.deletedCount} portfolio record(s) deleted and stats reset.`,
         deletedCount: result.deletedCount,
     });
 });
