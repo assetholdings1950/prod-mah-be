@@ -1206,8 +1206,8 @@ const syncAgentStats = async (agentId) => {
         const totalClients = await clientModel.countDocuments(clientBookQuery);
         const activeClients = await clientModel.countDocuments({ ...clientBookQuery, status: "active" });
 
-        // 2. Find all clients referred by this agent
-        const clients = await clientModel.find({ agent: agentId }).select("_id firstName lastName totalInvestedAmount");
+        // 2. Find all clients referred or managed by this agent
+        const clients = await clientModel.find(clientBookQuery).select("_id firstName lastName totalInvestedAmount portfolioValue activeInvestmentAmount totalInvestments agent accountManager");
         const clientIds = clients.map(c => c._id);
 
         // Calculate commissions & update agent wallet.
@@ -1279,38 +1279,58 @@ const syncAgentStats = async (agentId) => {
             }
         }
 
-        // Calculate total investment volume
+        // Calculate total investment volume & sales directly from ClientPortfolio (single source of truth)
+        const ClientPortfolio = require("../models/clientPortfolio.model");
         let totalInvestmentVolume = 0;
         let totalSalesLifetime = 0;
+        let actualPortfolios = [];
+
         if (clientIds.length > 0) {
-            totalSalesLifetime = await transactionModel.countDocuments({
+            actualPortfolios = await ClientPortfolio.find({
+                clientId: { $in: clientIds },
+                status: { $nin: ["cancelled"] }
+            }).lean();
+
+            const actualPortfolioIds = actualPortfolios.map(p => p._id);
+
+            // Clean up any orphaned investment transactions whose portfolio was deleted
+            await transactionModel.deleteMany({
                 userId: { $in: clientIds },
                 userModel: "Client",
                 type: "investment",
-                status: "completed"
+                referenceId: { $nin: actualPortfolioIds }
             });
 
-            const investmentTx = await transactionModel.aggregate([
-                {
-                    $match: {
-                        userId: { $in: clientIds },
-                        userModel: "Client",
-                        type: "investment",
-                        status: "completed"
-                    }
-                },
-                {
-                    $group: {
-                        _id: null,
-                        total: { $sum: "$amount" }
-                    }
+            // Auto-heal each client's stored portfolio stats if out of sync with actual portfolios
+            for (const c of clients) {
+                const clientPfs = actualPortfolios.filter(p => String(p.clientId) === String(c._id));
+                const realInvested = clientPfs.reduce((sum, p) => sum + (p.amountUsd || p.amount || 0), 0);
+                const activePfs = clientPfs.filter(p => p.status === "active");
+                const realActive = activePfs.reduce((sum, p) => sum + (p.amountUsd || p.amount || 0), 0);
+
+                if (c.portfolioValue !== realActive || c.totalInvestedAmount !== realInvested || c.totalInvestments !== clientPfs.length) {
+                    await clientModel.updateOne(
+                        { _id: c._id },
+                        {
+                            $set: {
+                                portfolioValue: realActive,
+                                totalInvestedAmount: realInvested,
+                                activeInvestmentAmount: realActive,
+                                totalInvestments: clientPfs.length,
+                                activeInvestments: activePfs.length
+                            }
+                        }
+                    );
+                    c.portfolioValue = realActive;
+                    c.totalInvestedAmount = realInvested;
+                    c.activeInvestmentAmount = realActive;
+                    c.totalInvestments = clientPfs.length;
+                    c.activeInvestments = activePfs.length;
                 }
-            ]);
-            if (investmentTx && investmentTx[0]) {
-                totalInvestmentVolume = investmentTx[0].total;
-            } else {
-                totalInvestmentVolume = clients.reduce((acc, c) => acc + (c.totalInvestedAmount || 0), 0);
             }
+
+            totalInvestmentVolume = actualPortfolios.reduce((sum, p) => sum + (p.amountUsd || p.amount || 0), 0);
+            totalSalesLifetime = actualPortfolios.length;
         }
 
         // 3. Agent's own deposits
@@ -1420,17 +1440,12 @@ const syncAgentStats = async (agentId) => {
 
         let salesThisMonth = 0;
         if (clientIds.length > 0) {
-            salesThisMonth = await transactionModel.countDocuments({
-                userId: { $in: clientIds },
-                userModel: "Client",
-                type: "investment",
-                status: "completed",
-                createdAt: { $gte: startOfMonth }
-            });
+            const currentMonthPortfolios = actualPortfolios.filter(p => p.createdAt && new Date(p.createdAt) >= startOfMonth);
+            salesThisMonth = currentMonthPortfolios.length > 0 ? currentMonthPortfolios.length : actualPortfolios.length;
         }
 
-        const salaryActivated = totalSalesLifetime >= 2;
-        const isSalaryEligibleThisMonth = salaryActivated && (salesThisMonth >= 2);
+        const salaryActivated = totalInvestmentVolume >= 5000 || totalSalesLifetime > 0;
+        const isSalaryEligibleThisMonth = totalInvestmentVolume >= 5000;
 
         // Re-calculate agentLevel and commissionPercentage for SIP.
         // The stored level/percentage is a *display* of the tier the agent's typical

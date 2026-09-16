@@ -26,6 +26,8 @@ const consultRoutes = require("./consult.routes")
 const fundTrustReportRoutes = require("./fundTrustReport.routes")
 const bondRoutes = require("./bond.routes")
 const adminEmailRoutes = require("./adminEmail.routes")
+const clientChatRoutes = require("./clientChat.routes")
+const agentAdminChatRoutes = require("./agentAdminChat.routes")
 
 module.exports = {
     authRoutes,
@@ -56,4 +58,7 @@ module.exports = {
     fundTrustReportRoutes,
     bondRoutes,
     adminEmailRoutes,
+    clientChatRoutes,
+    agentAdminChatRoutes,
 }
+

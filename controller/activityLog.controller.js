@@ -15,13 +15,15 @@ const getActivityLogsController = asyncHandler(async (req, res) => {
 
     const filter = {};
 
-    // Agent security check: Agent can only request logs of their own referred clients or themselves
+    // Agent security check: Agent can request logs of their own referred or managed clients, or themselves
     if (req.user && req.user.model === "Agent") {
         if (userId) {
             if (userModel === "Client") {
-                const client = await clientModel.findById(userId).select("agent").lean();
-                if (!client || String(client.agent) !== String(req.user.sub)) {
-                    return res.status(403).json({ status: false, message: "Forbidden - Client is not registered under your referral network." });
+                const client = await clientModel.findById(userId).select("agent accountManager").lean();
+                const isReferred = client && client.agent && String(client.agent) === String(req.user.sub);
+                const isManaged = client && client.accountManager && String(client.accountManager) === String(req.user.sub);
+                if (!client || (!isReferred && !isManaged)) {
+                    return res.status(403).json({ status: false, message: "Forbidden - Client is not registered or managed under your account." });
                 }
             } else if (userModel === "Agent") {
                 if (String(userId) !== String(req.user.sub)) {
@@ -33,10 +35,12 @@ const getActivityLogsController = asyncHandler(async (req, res) => {
             filter.userId = new mongoose.Types.ObjectId(userId);
             if (userModel) filter.userModel = userModel;
         } else {
-            const referredClients = await clientModel.find({ agent: req.user.sub }).select("_id").lean();
-            const referredClientIds = referredClients.map((c) => c._id);
+            const accessibleClients = await clientModel.find({
+                $or: [{ agent: req.user.sub }, { accountManager: req.user.sub }]
+            }).select("_id").lean();
+            const clientIds = accessibleClients.map((c) => c._id);
             if (userModel === "Client") {
-                filter.userId = { $in: referredClientIds };
+                filter.userId = { $in: clientIds };
                 filter.userModel = "Client";
             } else if (userModel === "Agent") {
                 filter.userId = new mongoose.Types.ObjectId(req.user.sub);
@@ -44,7 +48,7 @@ const getActivityLogsController = asyncHandler(async (req, res) => {
             } else {
                 filter.$or = [
                     { userId: new mongoose.Types.ObjectId(req.user.sub), userModel: "Agent" },
-                    { userId: { $in: referredClientIds }, userModel: "Client" }
+                    { userId: { $in: clientIds }, userModel: "Client" }
                 ];
             }
         }
