@@ -5,6 +5,9 @@ const userWalletModel = require("../models/userWallet.model");
 const userProjection = { firstName: 1, lastName: 1, fullName: 1, email: 1, clientId: 1, agentId: 1 };
 
 const ownerLookupStages = [
+    // Keep the original reference so transactions remain listable when an
+    // associated client, agent, or user is deleted.
+    { $set: { _ownerId: "$userId" } },
     {
         $lookup: {
             from: "users",
@@ -41,17 +44,22 @@ const ownerLookupStages = [
     {
         $addFields: {
             userId: {
-                $switch: {
-                    branches: [
-                        { case: { $eq: ["$userModel", "Client"] }, then: { $arrayElemAt: ["$_fromClients", 0] } },
-                        { case: { $eq: ["$userModel", "Agent"] }, then: { $arrayElemAt: ["$_fromAgents", 0] } }
-                    ],
-                    default: { $arrayElemAt: ["$_fromUsers", 0] }
-                }
+                $ifNull: [
+                    {
+                        $switch: {
+                            branches: [
+                                { case: { $eq: ["$userModel", "Client"] }, then: { $arrayElemAt: ["$_fromClients", 0] } },
+                                { case: { $eq: ["$userModel", "Agent"] }, then: { $arrayElemAt: ["$_fromAgents", 0] } }
+                            ],
+                            default: { $arrayElemAt: ["$_fromUsers", 0] }
+                        }
+                    },
+                    "$_ownerId"
+                ]
             }
         }
     },
-    { $project: { _fromUsers: 0, _fromClients: 0, _fromAgents: 0 } }
+    { $project: { _fromUsers: 0, _fromClients: 0, _fromAgents: 0, _ownerId: 0 } }
 ];
 
 
