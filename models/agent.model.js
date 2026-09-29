@@ -128,7 +128,6 @@ const agentSchema = new mongoose.Schema({
 
     agentLevel: {
         type: String,
-        enum: ["basic", "silver", "gold", "diamond"],
         default: "basic"
     },
 
@@ -150,6 +149,16 @@ const agentSchema = new mongoose.Schema({
     commissionPercentage: {
         type: Number,
         default: 2
+    },
+
+    // The active policy is the authoritative source for future commission.
+    // agentLevel/commissionPercentage remain as backward-compatible snapshots
+    // for existing screens and reports.
+    commissionTierPolicy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "CommissionTierPolicy",
+        default: null,
+        index: true
     },
 
     preferredCurrency: {
@@ -264,6 +273,14 @@ const agentSchema = new mongoose.Schema({
     }],
 
     totalInvestmentVolume: {
+        type: Number,
+        default: 0
+    },
+
+    // USD value of portfolios belonging to clients for whom this agent is the
+    // current account manager. This is intentionally distinct from the wider
+    // referral-network volume used by legacy reporting.
+    managedInvestmentVolume: {
         type: Number,
         default: 0
     },

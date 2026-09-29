@@ -64,7 +64,16 @@ const ownerLookupStages = [
 
 // ─── Create ───────────────────────────────────────────────────────────────────
 
-const createWithdrawalRequestQuery = async ({ userId, userModel, amount, currency, withdrawalMethod, bankDetailId, walletId, note }) => {
+const getAgentSourceBalance = async (agentId, fundSource) => {
+    const [credited] = await transactionModel.aggregate([{ $match: { userId: new mongoose.Types.ObjectId(agentId), userModel: "Agent", type: fundSource === "salary" ? "salary" : "earning", currency: "USD", status: "completed" } }, { $group: { _id: null, total: { $sum: "$amount" } } }]);
+    const withdrawalMatch = { userId: new mongoose.Types.ObjectId(agentId), userModel: "Agent", currency: "USD", status: "approved" };
+    if (fundSource === "salary") withdrawalMatch.fundSource = "salary";
+    else withdrawalMatch.$or = [{ fundSource: "commission" }, { fundSource: { $exists: false } }, { fundSource: null }];
+    const [paid] = await withdrawalRequestModel.aggregate([{ $match: withdrawalMatch }, { $group: { _id: null, total: { $sum: "$amount" } } }]);
+    return Math.max(0, Number(credited?.total || 0) - Number(paid?.total || 0));
+};
+
+const createWithdrawalRequestQuery = async ({ userId, userModel, amount, currency, withdrawalMethod, bankDetailId, walletId, note, fundSource = "commission" }) => {
     try {
         if (!userId || !userId.match(/^[0-9a-fA-F]{24}$/)) {
             return { status: false, statusCode: 400, message: "Invalid userId." };
@@ -103,6 +112,13 @@ const createWithdrawalRequestQuery = async ({ userId, userModel, amount, currenc
         }
 
         const requestCurrency = (currency || "USD").toUpperCase();
+        if (userModel === "Agent" && !["commission", "salary"].includes(fundSource)) {
+            return { status: false, statusCode: 400, message: "Invalid agent withdrawal source." };
+        }
+        if (userModel === "Agent" && requestCurrency === "USD") {
+            const sourceBalance = await getAgentSourceBalance(userId, fundSource);
+            if (sourceBalance < amount) return { status: false, statusCode: 400, message: `Insufficient ${fundSource} balance.` };
+        }
         const userWallet = await userWalletModel.findOne({ userId, userModel, currency: requestCurrency });
         if (!userWallet || userWallet.balance < amount) {
             return { status: false, statusCode: 400, message: `Insufficient ${requestCurrency} balance.` };
@@ -117,6 +133,7 @@ const createWithdrawalRequestQuery = async ({ userId, userModel, amount, currenc
             bankDetailId: withdrawalMethod === "bank" ? bankDetailId : null,
             walletId: withdrawalMethod === "wallet" ? walletId : null,
             note: note || "",
+            fundSource: userModel === "Agent" ? fundSource : "commission",
             status: "pending",
         });
 
@@ -357,6 +374,11 @@ const approveWithdrawalQuery = async ({ id, adminId }) => {
         }
 
         const withdrawalCurrency = (request.currency || "USD").toUpperCase();
+        const fundSource = request.fundSource || "commission";
+        if (request.userModel === "Agent" && withdrawalCurrency === "USD") {
+            const sourceBalance = await getAgentSourceBalance(request.userId.toString(), fundSource);
+            if (sourceBalance < request.amount) return { status: false, statusCode: 400, message: `Insufficient ${fundSource} balance to approve withdrawal.` };
+        }
         const userWallet = await userWalletModel.findOne({ userId: request.userId, userModel: request.userModel, currency: withdrawalCurrency });
         if (!userWallet || userWallet.balance < request.amount) {
             return { status: false, statusCode: 400, message: `Insufficient ${withdrawalCurrency} balance to approve withdrawal.` };
@@ -412,6 +434,7 @@ const approveWithdrawalQuery = async ({ id, adminId }) => {
             status: "completed",
             referenceId: request._id,
             description: `Withdrawal of ${request.amount} ${withdrawalCurrency} approved.`,
+            metadata: { fundSource },
             createdBy: adminId,
         });
 
@@ -705,6 +728,7 @@ const deleteWithdrawalsQuery = async (ids) => {
 };
 
 module.exports = {
+    getAgentSourceBalance,
     createWithdrawalRequestQuery,
     userWithdrawalListQuery,
     getUserWithdrawalByIdQuery,

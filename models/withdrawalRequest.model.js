@@ -31,6 +31,10 @@ const withdrawalRequestSchema = new mongoose.Schema(
             default: "USD",
         },
 
+        // Keeps manual salary settlement separate from commission settlement.
+        // Missing values on legacy requests are treated as commission.
+        fundSource: { type: String, enum: ["commission", "salary"], default: "commission", index: true },
+
         withdrawalMethod: {
             type: String,
             required: true,

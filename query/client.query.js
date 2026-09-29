@@ -260,6 +260,12 @@ const registerClientQuery = async (details) => {
         const generatedReferralCode =
             await generateUniqueReferralCode();
 
+        // A referral agent becomes the client's account manager immediately.
+        // This creates one clear commission owner for every future investment.
+        const referredAgentId = referrerType === "Agent"
+            ? referrer._id
+            : (referrerType === "Client" && referrer.agent ? referrer.agent : null);
+
         const newClient = await clientModel.create({
             ...details,
 
@@ -277,10 +283,12 @@ const registerClientQuery = async (details) => {
 
             referralCode: generatedReferralCode,
 
-            agent:
-                referrerType === "Agent"
-                    ? referrer._id
-                    : (referrerType === "Client" && referrer.agent ? referrer.agent : null),
+            agent: referredAgentId,
+            accountManager: referredAgentId,
+            accountManagerAssignedAt: referredAgentId ? new Date() : null,
+            // A referral assignment is system-derived, rather than an admin
+            // reassignment, so there is no admin actor to persist here.
+            accountManagerAssignedBy: null,
 
             registeredByAgent: details.registeredByAgent || false
         });
