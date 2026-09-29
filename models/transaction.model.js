@@ -20,7 +20,7 @@ const transactionSchema = new mongoose.Schema(
 
         type: {
             type: String,
-            enum: ["deposit", "withdrawal", "investment", "earning", "penalty", "charge"],
+            enum: ["deposit", "withdrawal", "investment", "earning", "salary", "penalty", "charge"],
             required: true,
             index: true,
         },
@@ -59,6 +59,10 @@ const transactionSchema = new mongoose.Schema(
             trim: true,
             default: "",
         },
+
+        // Immutable context for commission/audit records. Existing transactions
+        // need no migration because this is optional.
+        metadata: { type: mongoose.Schema.Types.Mixed, default: null },
 
         createdBy: {
             type: mongoose.Schema.Types.ObjectId,

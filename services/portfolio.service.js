@@ -8,6 +8,7 @@ const Transaction     = require("../models/transaction.model");
 const Client          = require("../models/client.model");
 const Agent           = require("../models/agent.model");
 const SipInstallmentEvent = require("../models/sipInstallmentEvent.model");
+const { creditCommissionForCompletedInvestment } = require("./agentCommission.service");
 
 const { default: sendNotificationMail } = require("../emailTemplate/sendNotificationMail");
 
@@ -343,6 +344,15 @@ async function createPortfolioService({
             createdPortfolio = portfolio;
         });
 
+        // Commission is recorded only after the investment transaction has
+        // committed. A commission failure must never roll back a successful
+        // client investment; the service is idempotent and can be retried.
+        try {
+            await creditCommissionForCompletedInvestment(transactionObjectId);
+        } catch (commissionError) {
+            console.error("[Commission] Could not credit initial investment:", commissionError.message);
+        }
+
         // Fire-and-forget: send confirmation email
         Client.findById(clientId, "email firstName").lean().then(client => {
             if (client?.email) {
@@ -619,6 +629,12 @@ async function payNextSipInstallmentService({ portfolioId, clientId, paymentCurr
                 { session }
             );
         });
+
+        try {
+            await creditCommissionForCompletedInvestment(transactionObjectId);
+        } catch (commissionError) {
+            console.error("[Commission] Could not credit SIP installment:", commissionError.message);
+        }
 
         return updatedPortfolio;
 
@@ -1324,6 +1340,7 @@ async function autoPaySipInstallmentService(portfolio) {
 
     let paymentResult = null;
     let processingError = null;
+    let commissionTransactionId = null;
 
     for (const wallet of wallets) {
         const currency = wallet.currency;
@@ -1439,6 +1456,7 @@ async function autoPaySipInstallmentService(portfolio) {
                 nextDueDate,
                 primaryWalletUsed: currency === primaryCurrency,
             };
+            commissionTransactionId = txId;
             break;
         } catch (err) {
             // Keep trying fallback wallets, but do not misreport database or
@@ -1451,6 +1469,11 @@ async function autoPaySipInstallmentService(portfolio) {
     }
 
     if (paymentResult) {
+        try {
+            await creditCommissionForCompletedInvestment(commissionTransactionId);
+        } catch (commissionError) {
+            console.error("[Commission] Could not credit auto SIP installment:", commissionError.message);
+        }
         return { success: true, ...paymentResult, walletsChecked: wallets.length };
     }
 

@@ -11,7 +11,7 @@ const otpVerificationModel = require("../models/otpVerification.model");
 const { uploadToCloudinary } = require("../services/cloudinaryUpload");
 const generateUniqueReferralCode = require("../utils/generateRefferalCode");
 const generateUniqueAgentId = require("../utils/generateUniqueAgentId");
-const { resolveSipRate, resolveSipTier } = require("../config/commissionTiers");
+const { getDefaultTierPolicy, getEffectiveTierPolicy } = require("../services/commissionTierPolicy.service");
 
 const authQuery = async (details) => {
     const { email, password } = details;
@@ -109,6 +109,7 @@ const signUpQuery = async (details) => {
         const uniqueAgentId = await generateUniqueAgentId();
 
         const uniqueRefCode = await generateUniqueReferralCode();
+        const defaultPolicy = await getDefaultTierPolicy();
 
         // Create fresh agent
         const newAgent = await agentModel.create({
@@ -121,6 +122,9 @@ const signUpQuery = async (details) => {
             agentId: uniqueAgentId,
             referralCode: uniqueRefCode,
             sponsorAgent: sponsor ? sponsor._id : null,
+            commissionTierPolicy: defaultPolicy?._id || null,
+            agentLevel: defaultPolicy?.slug || "basic",
+            commissionPercentage: Number(defaultPolicy?.commissionRate ?? 2),
             isVerified: false,
             status: "pending"
         });
@@ -256,6 +260,7 @@ const createActiveAgent = async (details, opts = {}) => {
         generateUniqueReferralCode()
     ]);
 
+    const defaultPolicy = await getDefaultTierPolicy();
     const agent = await agentModel.create({
         firstName,
         lastName,
@@ -266,6 +271,9 @@ const createActiveAgent = async (details, opts = {}) => {
         agentId,
         referralCode,
         sponsorAgent: sponsorId || null,
+        commissionTierPolicy: defaultPolicy?._id || null,
+        agentLevel: defaultPolicy?.slug || "basic",
+        commissionPercentage: Number(defaultPolicy?.commissionRate ?? 2),
         isVerified: true,
         status: "active",
         createdBy: createdBy || null
@@ -965,6 +973,7 @@ const editAgentQuery = async (details) => {
             "totalClients",
             "activeClients",
             "totalInvestmentVolume",
+            "managedInvestmentVolume",
             "lifetimeBusinessVolume",
             "totalDeposits",
             "totalWithdrawals",
@@ -977,7 +986,11 @@ const editAgentQuery = async (details) => {
             "isSalaryEligibleThisMonth",
             "salesThisMonth",
             "createdBy",
-            "updatedBy"
+            "updatedBy",
+            // Policy assignment, not these legacy snapshot fields, controls
+            // future commissions.
+            "agentLevel",
+            "commissionPercentage"
         ];
 
         const sanitized = Object.fromEntries(
@@ -1006,6 +1019,16 @@ const editAgentQuery = async (details) => {
         const newKycStatus = sanitized.kycStatus;
         const oldStatus = agent.status;
         const newStatus = sanitized.status;
+
+        if (sanitized.commissionTierPolicy !== undefined) {
+            const CommissionTierPolicy = require("../models/commissionTierPolicy.model");
+            const policy = await CommissionTierPolicy.findOne({ _id: sanitized.commissionTierPolicy, active: true });
+            if (!policy) {
+                return { status: false, statusCode: 400, message: "Select an active commission tier policy." };
+            }
+            sanitized.agentLevel = policy.slug;
+            sanitized.commissionPercentage = Number(policy.commissionRate);
+        }
 
         // Auto-update fullName if firstName or lastName is updated
         if (sanitized.firstName !== undefined || sanitized.lastName !== undefined) {
@@ -1161,6 +1184,7 @@ const getAgentByIdQuery = async (id) => {
         const agent = await agentModel.findById(id)
             .select("-passwordHash -refreshToken +currentPassword")
             .populate("sponsorAgent", "firstName lastName email agentId referralCode")
+            .populate("commissionTierPolicy", "name slug commissionRate active isDefault")
             .populate("kycVerification.verifiedBy", "firstName lastName email")
             .populate("createdBy", "firstName lastName email")
             .populate("updatedBy", "firstName lastName email")
@@ -1190,8 +1214,6 @@ const syncAgentStats = async (agentId) => {
     try {
         const clientModel = require("../models/client.model");
         const transactionModel = require("../models/transaction.model");
-        const userWalletModel = require("../models/userWallet.model");
-        const investmentPlanModel = require("../models/investmentsplans.model");
 
         if (!agentId) return;
 
@@ -1210,79 +1232,14 @@ const syncAgentStats = async (agentId) => {
         const clients = await clientModel.find(clientBookQuery).select("_id firstName lastName totalInvestedAmount portfolioValue activeInvestmentAmount totalInvestments agent accountManager");
         const clientIds = clients.map(c => c._id);
 
-        // Calculate commissions & update agent wallet.
-        // Commission (incl. the amount-tiered SIP rate) is earned ONLY on a
-        // referred CLIENT's investments. Agent-to-agent referral (`sponsorAgent`)
-        // carries NO commission — do not add downline/override earnings here.
-        if (clientIds.length > 0 && agent.isCommissionEligible) {
-            // Find completed investments chronologically
-            const completedInvestments = await transactionModel.find({
-                userId: { $in: clientIds },
-                userModel: "Client",
-                type: "investment",
-                status: "completed"
-            }).sort({ createdAt: 1 });
-
-            for (let i = 0; i < completedInvestments.length; i++) {
-                const investment = completedInvestments[i];
-
-                // Check if commission already calculated for this investment
-                const existingEarning = await transactionModel.findOne({
-                    userId: agentId,
-                    userModel: "Agent",
-                    type: "earning",
-                    referenceId: investment._id
-                });
-
-                if (!existingEarning) {
-                    const clientObj = clients.find(c => c._id.toString() === investment.userId.toString());
-                    const clientName = clientObj ? `${clientObj.firstName} ${clientObj.lastName}` : "Client";
-
-                    const plan = await investmentPlanModel.findById(investment.referenceId);
-
-                    let rate = resolveSipRate(0); // Default starting rate (lowest SIP tier)
-                    let isOneTime = false;
-
-                    if (plan) {
-                        if (plan.category === "lumpsum" || plan.category === "crypto") {
-                            rate = 1;
-                            isOneTime = true;
-                        } else if (plan.category === "monthly") {
-                            // SIP: rate is determined by the amount of THIS individual sale.
-                            rate = resolveSipRate(investment.amount);
-                        }
-                    }
-
-                    const commissionAmount = Number((investment.amount * (rate / 100)).toFixed(2));
-
-                    if (commissionAmount > 0) {
-                        // Create earning transaction for agent
-                        await transactionModel.create({
-                            userId: agentId,
-                            userModel: "Agent",
-                            type: "earning",
-                            amount: commissionAmount,
-                            currency: investment.currency || "USD",
-                            status: "completed",
-                            referenceId: investment._id,
-                            description: `Commission (${rate}% ${isOneTime ? "One-time" : "SIP"}) from client ${clientName} investment of ${investment.amount} ${investment.currency || "USD"}.`
-                        });
-
-                        // Credit agent wallet
-                        await userWalletModel.findOneAndUpdate(
-                            { userId: agentId, userModel: "Agent", currency: (investment.currency || "USD").toUpperCase() },
-                            { $inc: { balance: commissionAmount } },
-                            { upsert: true, new: true }
-                        );
-                    }
-                }
-            }
-        }
+        // Commission is credited only at the instant a completed investment is
+        // created. Do not scan historical client investments here: that could
+        // pay old transactions again after an account-manager reassignment.
 
         // Calculate total investment volume & sales directly from ClientPortfolio (single source of truth)
         const ClientPortfolio = require("../models/clientPortfolio.model");
         let totalInvestmentVolume = 0;
-        let totalSalesLifetime = 0;
+        let managedInvestmentVolume = 0;
         let actualPortfolios = [];
 
         if (clientIds.length > 0) {
@@ -1330,7 +1287,14 @@ const syncAgentStats = async (agentId) => {
             }
 
             totalInvestmentVolume = actualPortfolios.reduce((sum, p) => sum + (p.amountUsd || p.amount || 0), 0);
-            totalSalesLifetime = actualPortfolios.length;
+            const managedClientIds = new Set(
+                clients
+                    .filter((client) => String(client.accountManager || "") === String(agent._id))
+                    .map((client) => String(client._id)),
+            );
+            managedInvestmentVolume = actualPortfolios
+                .filter((portfolio) => managedClientIds.has(String(portfolio.clientId)))
+                .reduce((sum, portfolio) => sum + (portfolio.amountUsd || portfolio.amount || 0), 0);
         }
 
         // 3. Agent's own deposits
@@ -1338,7 +1302,9 @@ const syncAgentStats = async (agentId) => {
         const depositTx = await transactionModel.aggregate([
             {
                 $match: {
-                    userId: agentId,
+                    // Aggregation does not cast strings to ObjectIds. Use the
+                    // loaded agent document ID so commission totals match.
+                    userId: agent._id,
                     userModel: "Agent",
                     type: "deposit",
                     status: "completed"
@@ -1360,9 +1326,10 @@ const syncAgentStats = async (agentId) => {
         const withdrawalTx = await transactionModel.aggregate([
             {
                 $match: {
-                    userId: agentId,
+                    userId: agent._id,
                     userModel: "Agent",
                     type: "withdrawal",
+                    currency: "USD",
                     status: "completed"
                 }
             },
@@ -1382,9 +1349,10 @@ const syncAgentStats = async (agentId) => {
         const earningTx = await transactionModel.aggregate([
             {
                 $match: {
-                    userId: agentId,
+                    userId: agent._id,
                     userModel: "Agent",
                     type: "earning",
+                    currency: "USD",
                     status: "completed"
                 }
             },
@@ -1407,9 +1375,10 @@ const syncAgentStats = async (agentId) => {
         const pendingEarningTx = await transactionModel.aggregate([
             {
                 $match: {
-                    userId: agentId,
+                    userId: agent._id,
                     userModel: "Agent",
                     type: "earning",
+                    currency: "USD",
                     status: "pending"
                 }
             },
@@ -1424,70 +1393,13 @@ const syncAgentStats = async (agentId) => {
             pendingCommission = pendingEarningTx[0].total;
         }
 
-        // 8. Available commission balance (from Agent's wallet)
-        let availableCommissionBalance = 0;
-        const agentWallet = await userWalletModel.findOne({ userId: agentId, userModel: "Agent" });
-        if (agentWallet) {
-            availableCommissionBalance = agentWallet.balance;
-        } else {
-            availableCommissionBalance = Math.max(0, totalCommissionEarned - totalCommissionPaid);
-        }
+        // 8. Commission is USD-denominated. Use its ledger rather than an
+        // arbitrary agent wallet, which can hold a different cryptocurrency.
+        const availableCommissionBalance = Math.max(0, totalCommissionEarned - totalCommissionPaid);
 
-        // Calculate current month's sales
-        const startOfMonth = new Date();
-        startOfMonth.setUTCDate(1);
-        startOfMonth.setUTCHours(0, 0, 0, 0);
-
-        let salesThisMonth = 0;
-        if (clientIds.length > 0) {
-            const currentMonthPortfolios = actualPortfolios.filter(p => p.createdAt && new Date(p.createdAt) >= startOfMonth);
-            salesThisMonth = currentMonthPortfolios.length > 0 ? currentMonthPortfolios.length : actualPortfolios.length;
-        }
-
-        const salaryActivated = totalInvestmentVolume >= 5000 || totalSalesLifetime > 0;
-        const isSalaryEligibleThisMonth = totalInvestmentVolume >= 5000;
-
-        // Re-calculate agentLevel and commissionPercentage for SIP.
-        // The stored level/percentage is a *display* of the tier the agent's typical
-        // SIP sale lands in — the actual commission on every sale is resolved
-        // per-sale from its own amount (see resolveSipRate above).
-        let agentLevel = "basic";
-        let commissionPercentage = resolveSipTier(0).rate;
-
-        if (clientIds.length > 0) {
-            const sipInvestmentPlans = await investmentPlanModel
-                .find({ category: "monthly" })
-                .select("_id");
-            const sipPlanIds = sipInvestmentPlans.map(p => p._id);
-
-            if (sipPlanIds.length > 0) {
-                const sipTx = await transactionModel.aggregate([
-                    {
-                        $match: {
-                            userId: { $in: clientIds },
-                            userModel: "Client",
-                            type: "investment",
-                            status: "completed",
-                            referenceId: { $in: sipPlanIds }
-                        }
-                    },
-                    {
-                        $group: {
-                            _id: null,
-                            count: { $sum: 1 },
-                            total: { $sum: "$amount" }
-                        }
-                    }
-                ]);
-
-                if (sipTx && sipTx[0] && sipTx[0].count > 0) {
-                    const avgSipSale = sipTx[0].total / sipTx[0].count;
-                    const tier = resolveSipTier(avgSipSale);
-                    agentLevel = tier.level;
-                    commissionPercentage = tier.rate;
-                }
-            }
-        }
+        const policy = await getEffectiveTierPolicy(agent);
+        const agentLevel = policy?.slug || agent.agentLevel || "basic";
+        const commissionPercentage = Number(policy?.commissionRate ?? agent.commissionPercentage ?? 2);
 
         const lifetimeBusinessVolume = totalInvestmentVolume;
 
@@ -1498,6 +1410,7 @@ const syncAgentStats = async (agentId) => {
                     totalClients,
                     activeClients,
                     totalInvestmentVolume,
+                    managedInvestmentVolume,
                     lifetimeBusinessVolume,
                     totalDeposits,
                     totalWithdrawals,
@@ -1505,9 +1418,7 @@ const syncAgentStats = async (agentId) => {
                     totalCommissionPaid,
                     pendingCommission,
                     availableCommissionBalance,
-                    salesThisMonth,
-                    salaryActivated,
-                    isSalaryEligibleThisMonth,
+                    commissionTierPolicy: policy?._id || agent.commissionTierPolicy || null,
                     agentLevel,
                     commissionPercentage
                 }

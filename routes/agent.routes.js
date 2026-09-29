@@ -4,6 +4,10 @@ const {
     createAgentByAdminController,
     createReferralAgentByAgentController,
     getMyReferredAgentsController,
+    getMyCommissionTransactionsController,
+    creditAgentSalaryController,
+    getAgentSalaryPaymentsController,
+    getMySalaryBalanceController,
     verifyOtpController,
     resendOtpController,
     forgotPasswordController,
@@ -100,6 +104,12 @@ router.post("/me/wallets", authenticate, (req, res, next) => {
 // its sponsor. The sponsor is taken from the JWT, never the request body.
 router.post("/refer", authenticate, requireAgentPrincipal, createReferralAgentByAgentController);
 router.get("/me/referred-agents", authenticate, requireAgentPrincipal, getMyReferredAgentsController);
+router.get("/me/commission-transactions", authenticate, requireAgentPrincipal, getMyCommissionTransactionsController);
+router.get("/me/salary-balance", authenticate, requireAgentPrincipal, getMySalaryBalanceController);
+
+// Salary payments are manual admin finance operations, kept before /:id routes.
+router.get("/:agentId/salary-payments", authenticate, requireRole(["admin", "superadmin"]), getAgentSalaryPaymentsController);
+router.post("/:agentId/salary-payments", authenticate, requireRole(["admin", "superadmin"]), creditAgentSalaryController);
 
 // Agent Verification
 router.get("/verify/:agentId", async (req, res) => {

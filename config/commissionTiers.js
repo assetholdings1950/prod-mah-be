@@ -1,5 +1,5 @@
 /**
- * Commission Tiers (SIP) — single source of truth.
+ * Commission tiers — single source of truth.
  *
  * Agent commission on a SIP (monthly) sale is determined by the *amount* of that
  * individual sale:
@@ -9,7 +9,7 @@
  *   $10,001 – $25,000       -> 7.5%
  *   greater than $25,000    -> 10%
  *
- * The agent portal dashboard renders its "Commission Tiers (SIP)" panel from the
+ * The agent portal dashboard renders its "Commission Tiers" panel from the
  * mirror of this table at prod-mah-agent/src/config/commissionTiers.ts — keep the
  * two in sync when editing.
  */
@@ -41,7 +41,7 @@ function resolveSipTier(amount) {
 }
 
 /**
- * SIP commission rate (percentage) for a given sale amount.
+ * Commission rate (percentage) for a given completed investment amount.
  * @param {number} amount
  * @returns {number}
  */
