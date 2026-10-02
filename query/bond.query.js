@@ -26,8 +26,12 @@ const normalizeOptionalNumbers = (details) => {
         normalized.usdtBenefitPercent = 0;
         normalized.usdtLockMonths = null;
     }
-    if (normalized.usdtEarlyExitTreatment !== "partial_forfeit") normalized.usdtPartialForfeitPercent = null;
-    if (normalized.paidCouponTreatment !== "partial_clawback") normalized.paidCouponClawbackPercent = null;
+    if (normalized.usdtEarlyExitTreatment && normalized.usdtEarlyExitTreatment !== "partial_forfeit") {
+        normalized.usdtPartialForfeitPercent = null;
+    }
+    if (normalized.paidCouponTreatment && normalized.paidCouponTreatment !== "partial_clawback") {
+        normalized.paidCouponClawbackPercent = null;
+    }
     return normalized;
 };
 
@@ -80,6 +84,45 @@ const getBondByIdQuery = async (id) => {
     return { status: true, statusCode: 200, bond };
 };
 
+const getBondDocumentQuery = async (id, documentType) => {
+    if (!mongoose.isValidObjectId(id)) {
+        return { status: false, statusCode: 400, message: "Invalid bond id." };
+    }
+
+    const documentFields = {
+        "offering-document": "offeringDocumentUrl",
+        "term-sheet": "termSheetUrl",
+    };
+    const field = documentFields[documentType];
+    if (!field) {
+        return { status: false, statusCode: 400, message: "Invalid bond document type." };
+    }
+
+    const bond = await bondModel.findById(id).select(`name code ${field}`).lean();
+    if (!bond) return { status: false, statusCode: 404, message: "Bond not found." };
+
+    const url = String(bond[field] || "").trim();
+    if (!url) return { status: false, statusCode: 404, message: "Bond document not found." };
+
+    try {
+        const assetUrl = new URL(url);
+        const cloudName = process.env.CLOUDIONARY_CLOUD_NAME || process.env.CLOUDINARY_CLOUD_NAME;
+        const expectedPath = cloudName
+            ? new RegExp(`^/${cloudName}/raw/upload/(?:v\\d+/)?bonds/`)
+            : /^\/$/;
+        const isTrusted = assetUrl.protocol === "https:"
+            && assetUrl.hostname === "res.cloudinary.com"
+            && expectedPath.test(assetUrl.pathname);
+        if (!isTrusted) {
+            return { status: false, statusCode: 400, message: "Bond document URL is not trusted." };
+        }
+    } catch {
+        return { status: false, statusCode: 400, message: "Bond document URL is invalid." };
+    }
+
+    return { status: true, statusCode: 200, bond, url, documentType };
+};
+
 const updateBondQuery = async (details) => {
     const { _id, ...fields } = normalizeOptionalNumbers(details);
     if (!mongoose.isValidObjectId(_id)) {
@@ -123,4 +166,4 @@ const deleteBondsQuery = async (rawIds) => {
     return { status: true, statusCode: 200, message: "Bond(s) deleted successfully.", deletedCount: result.deletedCount };
 };
 
-module.exports = { createBondQuery, listBondsQuery, getBondByIdQuery, updateBondQuery, deleteBondsQuery };
+module.exports = { createBondQuery, listBondsQuery, getBondByIdQuery, getBondDocumentQuery, updateBondQuery, deleteBondsQuery };

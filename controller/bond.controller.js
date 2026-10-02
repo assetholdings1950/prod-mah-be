@@ -2,9 +2,11 @@ const {
     createBondQuery,
     listBondsQuery,
     getBondByIdQuery,
+    getBondDocumentQuery,
     updateBondQuery,
     deleteBondsQuery,
 } = require("../query/bond.query");
+const { downloadTrustedCloudinaryUrl, documentFilename } = require("../services/cloudinaryDownload.service");
 
 const send = (res, response) => res.status(response.statusCode || 200).send(response);
 
@@ -29,6 +31,26 @@ const getBondController = async (req, res, next) => {
     try { return send(res, await getBondByIdQuery(req.params.id)); } catch (error) { return next(error); }
 };
 
+const downloadBondDocumentController = async (req, res, next) => {
+    try {
+        const result = await getBondDocumentQuery(req.params.id, req.params.documentType);
+        if (!result.status) return send(res, result);
+
+        const { file, contentType } = await downloadTrustedCloudinaryUrl(result.url);
+        const suffix = result.documentType === "term-sheet" ? "term-sheet" : "offering-document";
+        const safeName = documentFilename(result.url, `${result.bond.code || "bond"}-${suffix}`);
+        res.set("Cache-Control", "private, no-store");
+        res.set("Content-Type", contentType);
+        res.set("Content-Disposition", `attachment; filename="${safeName}"`);
+        return res.status(200).send(file);
+    } catch (error) {
+        if (error?.response) {
+            return res.status(502).json({ status: false, message: "Cloudinary could not provide this bond document." });
+        }
+        return next(error);
+    }
+};
+
 const updateBondController = async (req, res, next) => {
     try { return send(res, await updateBondQuery({ ...req.body, updatedBy: req.user.sub })); } catch (error) { return next(error); }
 };
@@ -37,4 +59,4 @@ const deleteBondsController = async (req, res, next) => {
     try { return send(res, await deleteBondsQuery(req.query.ids)); } catch (error) { return next(error); }
 };
 
-module.exports = { createBondController, listBondsController, getBondController, updateBondController, deleteBondsController };
+module.exports = { createBondController, listBondsController, getBondController, downloadBondDocumentController, updateBondController, deleteBondsController };
