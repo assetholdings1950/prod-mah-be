@@ -106,4 +106,19 @@ async function getMyBondInvestmentsService({ clientId, status, page = 1, limit =
     };
 }
 
-module.exports = { createBondInvestmentService, getMyBondInvestmentsService, QUOTE_TTL_MS };
+async function getMyBondInvestmentByIdService({ clientId, investmentId }) {
+    if (!mongoose.isValidObjectId(investmentId)) throw { status: 404, message: "Bond investment not found." };
+    const investment = await ClientBondInvestment.findOne({ _id: investmentId, clientId }).lean();
+    if (!investment) throw { status: 404, message: "Bond investment not found." };
+
+    const bond = await Bond.findById(investment.bondId).select("offeringDocumentUrl termSheetUrl").lean();
+    return {
+        ...investment,
+        documents: {
+            offeringDocumentAvailable: Boolean(bond?.offeringDocumentUrl),
+            termSheetAvailable: Boolean(bond?.termSheetUrl),
+        },
+    };
+}
+
+module.exports = { createBondInvestmentService, getMyBondInvestmentsService, getMyBondInvestmentByIdService, QUOTE_TTL_MS };
