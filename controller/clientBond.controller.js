@@ -4,7 +4,7 @@ const {
     getBondDocumentQuery,
 } = require("../query/bond.query");
 const { downloadTrustedCloudinaryUrl, documentFilename } = require("../services/cloudinaryDownload.service");
-const { createBondInvestmentService, getMyBondInvestmentsService } = require("../services/bondInvestment.service");
+const { createBondInvestmentService, getMyBondInvestmentsService, getMyBondInvestmentByIdService } = require("../services/bondInvestment.service");
 
 const send = (res, response) => res.status(response.statusCode || 200).send(response);
 
@@ -67,4 +67,14 @@ const getMyBondInvestmentsController = async (req, res, next) => {
     } catch (error) { return next(error); }
 };
 
-module.exports = { listClientBondsController, getClientBondController, downloadClientBondDocumentController, investInBondController, getMyBondInvestmentsController };
+const getMyBondInvestmentController = async (req, res, next) => {
+    try {
+        const investment = await getMyBondInvestmentByIdService({ clientId: req.user.sub, investmentId: req.params.investmentId });
+        return res.status(200).json({ status: true, data: investment });
+    } catch (error) {
+        const status = error.status || 500;
+        return res.status(status).json({ status: false, message: error.message || "Failed to fetch bond investment." });
+    }
+};
+
+module.exports = { listClientBondsController, getClientBondController, downloadClientBondDocumentController, investInBondController, getMyBondInvestmentsController, getMyBondInvestmentController };
