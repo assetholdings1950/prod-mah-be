@@ -84,7 +84,41 @@ const getBondByIdQuery = async (id) => {
     return { status: true, statusCode: 200, bond };
 };
 
-const getBondDocumentQuery = async (id, documentType) => {
+const clientBondProjection = "-internalNotes -createdBy -updatedBy -version -status";
+
+const listActiveBondsQuery = async ({ page = 1, limit = 12, search = "", riskLevel, couponFrequency, term }) => {
+    const match = { status: "active" };
+    if (search.trim()) {
+        match.$or = ["name", "code", "slug", "shortDescription"].map((field) => ({
+            [field]: { $regex: search.trim(), $options: "i" },
+        }));
+    }
+    if (riskLevel) match.riskLevel = riskLevel;
+    if (couponFrequency) match.couponFrequency = couponFrequency;
+    if (term === "short") match.termMonths = { $lte: 36 };
+    if (term === "medium") match.termMonths = { $gte: 37, $lte: 60 };
+    if (term === "long") match.termMonths = { $gt: 60 };
+
+    const bonds = await bondModel.paginate(match, {
+        page,
+        limit: Math.min(Math.max(limit, 1), 24),
+        sort: { featured: -1, sortOrder: 1, createdAt: -1 },
+        select: clientBondProjection,
+        lean: true,
+    });
+    return { status: true, statusCode: 200, bonds };
+};
+
+const getActiveBondByIdentifierQuery = async (identifier) => {
+    const match = mongoose.isValidObjectId(identifier)
+        ? { _id: identifier, status: "active" }
+        : { slug: String(identifier || "").trim().toLowerCase(), status: "active" };
+    const bond = await bondModel.findOne(match).select(clientBondProjection).lean();
+    if (!bond) return { status: false, statusCode: 404, message: "Bond not found." };
+    return { status: true, statusCode: 200, bond };
+};
+
+const getBondDocumentQuery = async (id, documentType, { activeOnly = false } = {}) => {
     if (!mongoose.isValidObjectId(id)) {
         return { status: false, statusCode: 400, message: "Invalid bond id." };
     }
@@ -98,7 +132,8 @@ const getBondDocumentQuery = async (id, documentType) => {
         return { status: false, statusCode: 400, message: "Invalid bond document type." };
     }
 
-    const bond = await bondModel.findById(id).select(`name code ${field}`).lean();
+    const match = activeOnly ? { _id: id, status: "active" } : { _id: id };
+    const bond = await bondModel.findOne(match).select(`name code ${field}`).lean();
     if (!bond) return { status: false, statusCode: 404, message: "Bond not found." };
 
     const url = String(bond[field] || "").trim();
@@ -166,4 +201,4 @@ const deleteBondsQuery = async (rawIds) => {
     return { status: true, statusCode: 200, message: "Bond(s) deleted successfully.", deletedCount: result.deletedCount };
 };
 
-module.exports = { createBondQuery, listBondsQuery, getBondByIdQuery, getBondDocumentQuery, updateBondQuery, deleteBondsQuery };
+module.exports = { createBondQuery, listBondsQuery, listActiveBondsQuery, getBondByIdQuery, getActiveBondByIdentifierQuery, getBondDocumentQuery, updateBondQuery, deleteBondsQuery };
