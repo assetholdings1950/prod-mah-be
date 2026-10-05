@@ -6,6 +6,7 @@ const {
     createBondController,
     listBondsController,
     getBondController,
+    downloadBondDocumentController,
     updateBondController,
     deleteBondsController,
 } = require("../controller/bond.controller");
@@ -17,6 +18,7 @@ router.use(authenticate, requireRole(["admin", "superadmin"]));
 router.post("/", createBondController);
 router.get("/", listBondsController);
 router.post("/update", updateBondController);
+router.get("/:id/documents/:documentType", downloadBondDocumentController);
 router.get("/:id", getBondController);
 router.delete("/", deleteBondsController);
 router.use(commonErrors);

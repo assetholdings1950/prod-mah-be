@@ -8,7 +8,7 @@ dotenv.config()
 
 const { app_configuration } = require("./config/app.config")
 const connect_mongodb = require("./connections/mongo.connection")
-const { authRoutes, roleRoutes, clientRoutes, agentRoutes, investmentPlanRoutes, cloudionaryRoutes, paymentMethodRoutes, depositRoutes, transactionRoutes, withdrawalRoutes, dashboardRoutes, contactRoutes, currencyRoutes, countryRoutes, portfolioRoutes, planChargesRoutes, cronRoutes, activityLogRoutes, accountOpeningFormRoutes, notificationRoutes, reportRoutes, jobRoutes, hiringRoutes, consultantRequestRoutes, consultRoutes, fundTrustReportRoutes, bondRoutes, adminEmailRoutes, clientChatRoutes, agentAdminChatRoutes, commissionTierPolicyRoutes } = require("./routes")
+const { authRoutes, roleRoutes, clientRoutes, agentRoutes, investmentPlanRoutes, cloudionaryRoutes, paymentMethodRoutes, depositRoutes, transactionRoutes, withdrawalRoutes, dashboardRoutes, contactRoutes, currencyRoutes, countryRoutes, portfolioRoutes, planChargesRoutes, cronRoutes, activityLogRoutes, accountOpeningFormRoutes, notificationRoutes, reportRoutes, jobRoutes, hiringRoutes, consultantRequestRoutes, consultRoutes, fundTrustReportRoutes, bondRoutes, clientBondRoutes, adminEmailRoutes, clientChatRoutes, agentAdminChatRoutes, commissionTierPolicyRoutes } = require("./routes")
 
 const schedulePortfolioMaturityChecker = require("./cron/portfolioMaturity")
 const { scheduleSipAutoPayment } = require("./cron/sipAutoPayment")
@@ -80,6 +80,7 @@ function setupRoutes(app) {
     app.use("/consult", consultRoutes);
     app.use("/fund-trust-reports", fundTrustReportRoutes);
     app.use("/bonds", bondRoutes);
+    app.use("/client/bonds", clientBondRoutes);
     app.use("/email-center", adminEmailRoutes);
     app.use("/chat", clientChatRoutes);
     app.use("/api/chat/client", clientChatRoutes);

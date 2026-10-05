@@ -6,6 +6,8 @@ const ClientPortfolio = require("../models/clientPortfolio.model");
 const { getEffectiveTierPolicy } = require("./commissionTierPolicy.service");
 
 async function getInvestmentUsdValue(investment) {
+    const recordedUsdAmount = Number(investment.usdAmount || 0);
+    if (Number.isFinite(recordedUsdAmount) && recordedUsdAmount > 0) return recordedUsdAmount;
     // The transaction amount is the crypto quantity paid. A portfolio lot is
     // the authoritative record of the corresponding USD investment value.
     const portfolio = await ClientPortfolio.findOne({

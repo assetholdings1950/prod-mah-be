@@ -1485,6 +1485,8 @@ async function autoPaySipInstallmentService(portfolio) {
 }
 
 module.exports = {
+    ensureInvestmentEligibility,
+    SUPPORTED_CRYPTO,
     confirmPortfolioService,
     createPortfolioService,
     getMyPortfoliosService,
